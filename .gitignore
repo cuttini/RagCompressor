@@ -53,3 +53,10 @@ env/
 # Model caches (if any)
 .cache/
 models/
+
+# External Repositories
+docstrange_repo/
+hunyuan_repo/
+
+# Temporary Configs
+tmp_model_config/

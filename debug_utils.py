@@ -26,7 +26,7 @@ def draw_boxes_on_page(image: Image.Image, boxes: List[Dict], color="red", width
                 pass
     return image
 
-def visualize_chunks(pdf_path: str, layout_data: List[Dict], chunks: List[Dict], output_dir: Path):
+def visualize_chunks(pdf_path: str, layout_data: List[Dict], chunks: List[Dict], output_dir: Path, max_pages: int = None):
     """
     Visualize semantic chunks on PDF pages.
     
@@ -35,12 +35,13 @@ def visualize_chunks(pdf_path: str, layout_data: List[Dict], chunks: List[Dict],
         layout_data: List of page objects, each containing 'blocks' with 'text' and 'bbox'.
         chunks: List of semantic chunks, each containing 'content'.
         output_dir: Directory to save visualized images.
+        max_pages: Optional limit on number of pages to process.
     """
     output_dir.mkdir(exist_ok=True, parents=True)
     
     # Convert PDF to images
     print(f"[visualize] Converting PDF {pdf_path} to images...")
-    images = convert_from_path(pdf_path)
+    images = convert_from_path(pdf_path, last_page=max_pages)
     
     # Map chunks to layout blocks
     # This is a heuristic mapping based on text overlap

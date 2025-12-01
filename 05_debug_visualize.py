@@ -8,8 +8,10 @@ os.environ["PATH"] += os.pathsep + "/home/sysadmin/miniconda3/envs/clara/bin"
 from config import EBOOKS_DIR, MARKDOWN_DIR, CHUNKS_PATH, ARTIFACTS_DIR
 from debug_utils import visualize_chunks
 
-def run_debug_visualization():
+def run_debug_visualization(max_pages: int = None):
     print("Starting Debug Visualization...")
+    if max_pages:
+        print(f"Limiting to first {max_pages} pages.")
     
     # Load chunks
     if not CHUNKS_PATH.exists():
@@ -50,8 +52,13 @@ def run_debug_visualization():
             layout_data = json.load(f)
             
         output_dir = ARTIFACTS_DIR / "debug_vis" / base_name
-        visualize_chunks(str(pdf_path), layout_data, file_chunks, output_dir)
+        visualize_chunks(str(pdf_path), layout_data, file_chunks, output_dir, max_pages=max_pages)
         print(f"Visualization saved to {output_dir}")
 
 if __name__ == "__main__":
-    run_debug_visualization()
+    import argparse
+    parser = argparse.ArgumentParser(description="Visualize semantic chunks on PDF pages.")
+    parser.add_argument("--max-pages", type=int, help="Limit the number of pages to process per PDF.")
+    args = parser.parse_args()
+    
+    run_debug_visualization(max_pages=args.max_pages)
