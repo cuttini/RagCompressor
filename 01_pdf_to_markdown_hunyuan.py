@@ -5,6 +5,9 @@ import time
 from pathlib import Path
 from typing import Optional, List
 
+# Ensure poppler is found by adding conda bin to PATH
+os.environ["PATH"] += os.pathsep + "/home/sysadmin/miniconda3/envs/clara/bin"
+
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image
 from tqdm import tqdm
@@ -58,7 +61,7 @@ def convert_pdfs_hunyuan(input_dir: Path, output_dir: Path, max_pages: Optional[
     # 2. Iterate Files
     # Convert string paths to Path objects if they aren't already
     input_dir = Path(input_dir)
-    pdf_files = [f for f in input_dir.iterdir() if f.suffix.lower() == ".pdf"]
+    pdf_files = list(input_dir.rglob("*.pdf"))
     
     if not pdf_files:
         logger.warning(f"No PDF files found in {input_dir}")
@@ -157,7 +160,8 @@ def convert_pdfs_hunyuan(input_dir: Path, output_dir: Path, max_pages: Optional[
                         start_time = time.time()
                         text = processor.extract_text(img_resized)
                         elapsed_time = time.time() - start_time
-                        logger.info(f"Processed page {page_num} in {elapsed_time:.2f}s")
+                        logger.debug(f"Processed page {page_num} in {elapsed_time:.2f}s")
+                        progress_bar.set_postfix({"time": f"{elapsed_time:.2f}s"})
                     except Exception as e:
                         logger.error(f"OCR Error on page {page_num}: {e}")
                         text = f"> [Error processing page {page_num}]"

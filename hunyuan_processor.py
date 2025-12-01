@@ -47,7 +47,7 @@ class HunyuanProcessor:
         Extracts text (markdown) from a PIL Image using HunyuanOCR.
         """
         try:
-            logger.info(f"Processing image of size: {image.size}")
+            logger.debug(f"Processing image of size: {image.size}")
             torch.cuda.empty_cache()
             
             # Prepare inputs with the specific OCR prompt
