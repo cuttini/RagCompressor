@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-CHUNK_SIZE = 10  # Number of pages to load into memory at once
+DEFAULT_CHUNK_SIZE = 32  # Number of pages to load into memory at once (optimized for high-end GPUs)
 MAX_IMG_DIM = 2048
 
 def resize_image_if_needed(img: Image.Image, max_dim: int = MAX_IMG_DIM) -> Image.Image:
@@ -38,7 +38,7 @@ def resize_image_if_needed(img: Image.Image, max_dim: int = MAX_IMG_DIM) -> Imag
         return img.resize(new_size, Image.Resampling.LANCZOS)
     return img
 
-def convert_pdfs_hunyuan(input_dir: Path, output_dir: Path, max_pages: Optional[int] = None, debug: bool = False) -> None:
+def convert_pdfs_hunyuan(input_dir: Path, output_dir: Path, max_pages: Optional[int] = None, chunk_size: int = DEFAULT_CHUNK_SIZE, debug: bool = False) -> None:
     # 1. Initialize Processor
     try:
         logger.info("Initializing HunyuanProcessor...")
@@ -90,10 +90,6 @@ def convert_pdfs_hunyuan(input_dir: Path, output_dir: Path, max_pages: Optional[
                 pages_to_process = max_pages
                 logger.info(f"Limiting processing to first {pages_to_process} pages.")
 
-            # Create/Clear the output file
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(f"# {pdf_path.stem}\n\n")
-
             # 3. Chunked Processing Loop
             # We process in chunks to avoid loading 500 images into RAM
             progress_bar = tqdm(total=pages_to_process, desc=f"Converting {pdf_path.name}", unit="page")
@@ -101,84 +97,88 @@ def convert_pdfs_hunyuan(input_dir: Path, output_dir: Path, max_pages: Optional[
             # Store layout data for the entire PDF
             full_layout_data = []
 
-            for chunk_start in range(1, pages_to_process + 1, CHUNK_SIZE):
-                chunk_end = min(chunk_start + CHUNK_SIZE - 1, pages_to_process)
+            # Open output file once for the entire PDF (major I/O optimization)
+            with open(output_path, "w", encoding="utf-8") as md_file:
+                # Write header
+                md_file.write(f"# {pdf_path.stem}\n\n")
                 
-                logger.info(f"Processing chunk: Pages {chunk_start}-{chunk_end}")
-
-                try:
-                    # Convert only the specific range of pages
-                    images = convert_from_path(
-                        pdf_path, 
-                        first_page=chunk_start, 
-                        last_page=chunk_end
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to convert pages {chunk_start}-{chunk_end}: {e}")
-                    continue
-
-                chunk_markdown = []
-
-                for i, img in enumerate(images):
-                    page_num = chunk_start + i
+                for chunk_start in range(1, pages_to_process + 1, chunk_size):
+                    chunk_end = min(chunk_start + chunk_size - 1, pages_to_process)
                     
-                    progress_bar.set_description(f"OCR Page {page_num}")
-                    
-                    # Convert to RGB if needed
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
+                    logger.info(f"Processing chunk: Pages {chunk_start}-{chunk_end}")
 
-                    # Debug Save
-                    if debug:
-                        debug_path = output_dir / "debug_hunyuan" / f"{pdf_path.stem}_page_{page_num}.jpg"
-                        img.save(debug_path)
-                    
-                    # Extract Layout (Docstrange) - BEFORE resizing for OCR if possible, 
-                    # but Docstrange expects full size usually. 
-                    # Note: We should probably keep the original image for layout extraction 
-                    # and use the resized one for Hunyuan if needed. 
-                    # However, Hunyuan resize is only if > 2048. 
-                    # Let's extract layout on the original image to be safe/accurate.
-                    page_blocks = []
-                    if layout_extractor:
-                        try:
-                            # Extract layout
-                            page_blocks = layout_extractor.extract_layout(img)
-                        except Exception as e:
-                            logger.error(f"Failed to extract layout on page {page_num}: {e}")
-                    
-                    full_layout_data.append({
-                        "page": page_num,
-                        "blocks": page_blocks
-                    })
-
-                    # Resize for Hunyuan
-                    img_resized = resize_image_if_needed(img)
-
-                    # Extract Text
                     try:
-                        start_time = time.time()
-                        text = processor.extract_text(img_resized)
-                        elapsed_time = time.time() - start_time
-                        logger.debug(f"Processed page {page_num} in {elapsed_time:.2f}s")
-                        progress_bar.set_postfix({"time": f"{elapsed_time:.2f}s"})
+                        # Convert only the specific range of pages
+                        images = convert_from_path(
+                            pdf_path, 
+                            first_page=chunk_start, 
+                            last_page=chunk_end
+                        )
                     except Exception as e:
-                        logger.error(f"OCR Error on page {page_num}: {e}")
-                        text = f"> [Error processing page {page_num}]"
+                        logger.error(f"Failed to convert pages {chunk_start}-{chunk_end}: {e}")
+                        continue
 
-                    # Format Markdown
-                    page_md = f"## Page {page_num}\n\n{text}\n\n---\n\n"
-                    chunk_markdown.append(page_md)
-                    
-                    progress_bar.update(1)
+                    chunk_markdown = []
 
-                # Write chunk to file immediately (safer than holding in memory)
-                with open(output_path, "a", encoding="utf-8") as f:
-                    f.writelines(chunk_markdown)
+                    for i, img in enumerate(images):
+                        page_num = chunk_start + i
+                        
+                        progress_bar.set_description(f"OCR Page {page_num}")
+                        
+                        # Convert to RGB if needed
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
 
-                # Cleanup memory
-                del images
-                gc.collect() # Force garbage collection for large image objects
+                        # Debug Save
+                        if debug:
+                            debug_path = output_dir / "debug_hunyuan" / f"{pdf_path.stem}_page_{page_num}.jpg"
+                            img.save(debug_path)
+                        
+                        # Extract Layout (Docstrange) - BEFORE resizing for OCR if possible, 
+                        # but Docstrange expects full size usually. 
+                        # Note: We should probably keep the original image for layout extraction 
+                        # and use the resized one for Hunyuan if needed. 
+                        # However, Hunyuan resize is only if > 2048. 
+                        # Let's extract layout on the original image to be safe/accurate.
+                        page_blocks = []
+                        if layout_extractor:
+                            try:
+                                # Extract layout
+                                page_blocks = layout_extractor.extract_layout(img)
+                            except Exception as e:
+                                logger.error(f"Failed to extract layout on page {page_num}: {e}")
+                        
+                        full_layout_data.append({
+                            "page": page_num,
+                            "blocks": page_blocks
+                        })
+
+                        # Resize for Hunyuan
+                        img_resized = resize_image_if_needed(img)
+
+                        # Extract Text
+                        try:
+                            start_time = time.time()
+                            text = processor.extract_text(img_resized)
+                            elapsed_time = time.time() - start_time
+                            logger.debug(f"Processed page {page_num} in {elapsed_time:.2f}s")
+                            progress_bar.set_postfix({"time": f"{elapsed_time:.2f}s"})
+                        except Exception as e:
+                            logger.error(f"OCR Error on page {page_num}: {e}")
+                            text = f"> [Error processing page {page_num}]"
+
+                        # Format Markdown
+                        page_md = f"## Page {page_num}\n\n{text}\n\n---\n\n"
+                        chunk_markdown.append(page_md)
+                        
+                        progress_bar.update(1)
+
+                    # Write chunk immediately (avoids holding all pages in memory)
+                    md_file.writelines(chunk_markdown)
+
+                    # Cleanup memory
+                    del images
+                    gc.collect() # Force garbage collection for large image objects
             
             progress_bar.close()
             
@@ -203,6 +203,8 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Save debug images")
     parser.add_argument("--max-pages", type=int, default=MAX_PAGES_PER_PDF, 
                         help="Limit pages per PDF (default: from config)")
+    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
+                        help=f"Number of pages to process at once (default: {DEFAULT_CHUNK_SIZE})")
     parser.add_argument("--poppler-path", type=str, 
                         help="Optional: Path to poppler bin folder if not in PATH")
 
@@ -213,4 +215,4 @@ if __name__ == "__main__":
         os.environ["PATH"] += os.pathsep + args.poppler_path
     
     # Run
-    convert_pdfs_hunyuan(EBOOKS_DIR, MARKDOWN_DIR, max_pages=args.max_pages, debug=args.debug)
+    convert_pdfs_hunyuan(EBOOKS_DIR, MARKDOWN_DIR, max_pages=args.max_pages, chunk_size=args.chunk_size, debug=args.debug)

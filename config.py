@@ -36,4 +36,4 @@ SEED = 42
 NANONETS_MODEL_ID = "nanonets/Nanonets-OCR2-3B"  # or "nanonets/Nanonets-OCR-ss"
 
 # PDF Processing
-MAX_PAGES_PER_PDF = 50  # Set to an integer to limit pages per PDF, or None for all pages
+MAX_PAGES_PER_PDF = None  # Set to an integer to limit pages per PDF, or None for all pages
