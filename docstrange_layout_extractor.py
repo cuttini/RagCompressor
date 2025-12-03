@@ -14,8 +14,12 @@ from PIL import Image
 from docstrange.pipeline.neural_document_processor import NeuralDocumentProcessor
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.ERROR)  # Only errors
 logger = logging.getLogger(__name__)
+
+# Suppress library warnings
+import warnings
+warnings.filterwarnings('ignore')
 
 class DocstrangeLayoutExtractor(NeuralDocumentProcessor):
     """
@@ -24,20 +28,35 @@ class DocstrangeLayoutExtractor(NeuralDocumentProcessor):
     Inherits from NeuralDocumentProcessor to reuse initialized models.
     """
     
-    def __init__(self, cache_dir: str = None):
-        """Initialize the extractor and load models via parent class."""
+    def __init__(self, cache_dir: str = None, device: str = None):
+        """Initialize the extractor and load models via parent class.
+        
+        Args:
+            cache_dir: Optional directory for caching models
+            device: Device to use for inference ('cuda' or 'cpu'). If None, auto-detects CUDA availability.
+        """
+        # Auto-detect device if not specified
+        if device is None:
+            try:
+                import torch
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            except ImportError:
+                device = 'cpu'
+        
+        # Note: NeuralDocumentProcessor doesn't accept device parameter, it auto-detects
         super().__init__(cache_dir=Path(cache_dir) if cache_dir else None)
         
-    def extract_layout(self, image_input: Any) -> List[Dict[str, Any]]:
+    def extract_layout(self, image_input: Any, extract_text_content: bool = True) -> List[Dict[str, Any]]:
         """
         Extract layout elements with bounding boxes from an image.
         
         Args:
             image_input: Path to the image file or PIL Image object.
+            extract_text_content: If True, extracts text from each region (slow). If False, returns empty text.
             
         Returns:
             List of dictionaries containing:
-            - text: The extracted text
+            - text: The extracted text (or empty string if disabled)
             - bbox: [x1, y1, x2, y2]
             - label: The type of element (text, title, table, etc.)
             - confidence: Confidence score
@@ -83,10 +102,14 @@ class DocstrangeLayoutExtractor(NeuralDocumentProcessor):
                 confidence = pred.get('confidence', 1.0)
                 
                 # Extract text from the region using parent class method or custom logic
-                # Parent class has _extract_text_from_region but it takes bbox as list
-                text = self._extract_text_from_region(img, bbox)
+                text = ""
+                if extract_text_content:
+                    # Parent class has _extract_text_from_region but it takes bbox as list
+                    text = self._extract_text_from_region(img, bbox)
                 
-                if not text.strip():
+                # If we are not extracting text, we still keep the block (it's a layout element)
+                # If we ARE extracting text, we might want to filter empty ones, but let's keep consistent
+                if extract_text_content and not text.strip():
                     continue
                     
                 element = {

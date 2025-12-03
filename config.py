@@ -37,3 +37,15 @@ NANONETS_MODEL_ID = "nanonets/Nanonets-OCR2-3B"  # or "nanonets/Nanonets-OCR-ss"
 
 # PDF Processing
 MAX_PAGES_PER_PDF = None  # Set to an integer to limit pages per PDF, or None for all pages
+
+# Batch Processing for HunyuanOCR
+ENABLE_BATCH_INFERENCE = False # Set to False to disable batch inference and process pages sequentially
+BATCH_SIZE = 1  # Number of pages to process in a single batch (2-4 recommended for 32GB VRAM)
+MAX_IMAGE_DIMENSION = 2048  # Maximum width or height for images before batching
+
+# Parallel Processing (alternative to batching)
+NUM_PARALLEL_WORKERS = 6  # Number of parallel HunyuanOCR model instances (set to 2-4 for high VRAM GPUs)
+CHUNK_SIZE = 6  # Small chunk size for pipelining (load 10, submit 10, repeat)
+
+# Layout Extraction
+ENABLE_LAYOUT_EXTRACTION = False  # Set to False to skip layout extraction and only perform OCR
