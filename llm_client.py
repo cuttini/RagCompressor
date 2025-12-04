@@ -6,10 +6,17 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from config import VLLM_BASE_URL, VLLM_API_KEY, VLLM_MODEL_NAME
 
 class QwenClient:
-    def __init__(self):
+    def __init__(self, timeout: int = 120):
+        """
+        Inizializza il client Qwen con timeout configurabile.
+        
+        Args:
+            timeout: Timeout in secondi per le richieste HTTP (default: 120s)
+        """
         self.client = OpenAI(
             base_url=f"{VLLM_BASE_URL}",
             api_key=VLLM_API_KEY,
+            timeout=timeout,  # Timeout per evitare hang infiniti
         )
         self.model = VLLM_MODEL_NAME
 

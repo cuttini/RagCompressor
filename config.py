@@ -26,8 +26,16 @@ CONTEXT_WINDOW_SIZE = 131072  # 128k
 # target approssimativo di token modello, usiamo conteggio di subword Qwen
 TOKENIZER_NAME = "Qwen/Qwen2.5-32B-Instruct"
 MAX_TOKENS_PER_CHUNK = 800
-MIN_WORDS_PER_CHUNK = 1  # Capture all non-empty content
-WINDOW_SIZE = 3  # Numero di chunk nella sliding window (es. prev + curr + next)
+MIN_WORDS_PER_CHUNK = 10  # Minimum word count to filter short chunks
+MIN_CONTENT_CHARS = 500  # Minimum characters of actual content (excluding metadata/headers)
+# Adaptive Sliding Window
+MIN_WINDOW_SIZE = 3  # Minimum window size (provides basic context)
+MAX_WINDOW_SIZE = 7  # Maximum window size (stays within CLaRa's limits)
+WINDOW_SIZE = 5  # Default/reference window size (allineato a CLaRa generation_top_k)
+
+# Table-aware chunking
+ALLOW_TABLE_OVERFLOW = True  # Permetti chunk più grandi per tabelle complete
+MAX_TABLE_TOKENS = MAX_TOKENS_PER_CHUNK * 3  # Limite assoluto per tabelle (2400 tokens)
 
 # Prompting
 SEED = 42
