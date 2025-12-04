@@ -3,6 +3,7 @@ artifacts/
 ebooks_seac/
 markdown_seac/
 old/
+tmp/
 
 # Python
 __pycache__/
