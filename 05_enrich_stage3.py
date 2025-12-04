@@ -1,10 +1,46 @@
 import json
 import random
+import string
 from pathlib import Path
 from rank_bm25 import BM25Okapi
 from tqdm import tqdm
 
 from config import CHUNKS_PATH, STAGE1_2_PATH, ARTIFACTS_DIR
+
+# Italian language support for better BM25 retrieval
+try:
+    from nltk.stem.snowball import ItalianStemmer
+    STEMMER = ItalianStemmer()
+    USE_STEMMER = True
+except ImportError:
+    print("[WARNING] NLTK not available. BM25 will use simple tokenization without stemming.")
+    print("         Install with: pip install nltk && python -c \"import nltk; nltk.download('punkt')\"")
+    USE_STEMMER = False
+
+def tokenize_italian(text: str) -> list:
+    """
+    Tokenize text for Italian language BM25 retrieval.
+    
+    Features:
+    - Removes punctuation
+    - Lowercase normalization
+    - Italian stemming (if NLTK available) to match inflections:
+      pagare/pagamento/pagato → pag
+    
+    Args:
+        text: Input text to tokenize
+        
+    Returns:
+        List of normalized/stemmed tokens
+    """
+    # Remove punctuation and lowercase
+    text = text.lower().translate(str.maketrans('', '', string.punctuation))
+    tokens = text.split()
+    
+    if USE_STEMMER:
+        return [STEMMER.stem(token) for token in tokens]
+    else:
+        return tokens
 
 # Configurazione
 INPUT_FILE = STAGE1_2_PATH  # Output dello script 03 (stage1_2_instruction.jsonl)
@@ -21,8 +57,8 @@ def main():
         for line in f:
             c = json.loads(line)
             all_chunks.append(c)
-            # Tokenizziamo semplicemente per BM25
-            chunk_contents.append(c['content'].lower().split())
+            # Use Italian-aware tokenization for better BM25 matching
+            chunk_contents.append(tokenize_italian(c['content']))
 
     # Creiamo l'indice BM25 per trovare Hard Negatives velocemente
     print("Indicizzazione BM25 (per Hard Negatives)...")
@@ -40,8 +76,8 @@ def main():
             gold_contents = set(gold_docs)
             
             # --- A. TROVARE HARD NEGATIVES ---
-            # Cerchiamo chunk simili alla domanda
-            tokenized_query = question.lower().split()
+            # Cerchiamo chunk simili alla domanda usando tokenizzazione italiana
+            tokenized_query = tokenize_italian(question)
             # Ne prendiamo 50 per essere sicuri di trovarne esclusi i gold
             candidates = bm25.get_top_n(tokenized_query, all_chunks, n=50)
             
@@ -88,7 +124,7 @@ def main():
             stage3_record = {
                 "question": question,
                 "docs": new_docs,
-                "gold_answer": record['gold_answer'], # O 'answer' a seconda di come l'hai chiamato
+                "answer": record['answer'],
                 "pos_index": new_pos_index,
                 "data_type": "qa" # Stage 3 supporta solo qa di solito
             }

@@ -389,6 +389,11 @@ def chunk_markdown(md_text: str, source_file: str) -> List[Dict]:
         if title.startswith("TOC -"):
             return
         
+        # FIX: Discard chunks that start with orphaned closing table tags
+        # These are residual errors from OCR table fragmentation
+        if body.startswith('</table>'):
+            return
+        
         # REMOVE BOILERPLATE: Skip sections with non-relevant administrative content
         section_title_lower = clean_title(title).lower()
         boilerplate_patterns = [
@@ -443,16 +448,9 @@ def chunk_markdown(md_text: str, source_file: str) -> List[Dict]:
             if len(sub.split()) < MIN_WORDS_PER_CHUNK:
                 continue
             
-            # INIETTA HEADER DI METADATI STRUTTURATI
-            metadata_header = f"""[CONTESTO]
-FONTE: {metadata['source_cleaned']}
-ANNO: {metadata['year']}
-AMBITO: {metadata['topic']}
-SEZIONE: {section_title}
-PAGINA: {page_number}
-[/CONTESTO]
-
-"""
+            # INIETTA HEADER DI METADATI STRUTTURATI (Compact format)
+            # Old format: ~100 tokens, New format: ~20-30 tokens
+            metadata_header = f"> {metadata['source_cleaned']} {metadata['year']} | {metadata['topic']} | {section_title} (p.{page_number}) <\n\n"
             
             # Assembla il contenuto finale con header + titolo + testo
             final_content = f"{metadata_header}{title.strip()}\n\n{sub.strip()}"

@@ -73,7 +73,7 @@ Schema JSON atteso:
 # === UTILITY FUNCTIONS ===
 def extract_numbers(text: str) -> set:
     """
-    Estrae tutti i numeri rilevanti da un testo fiscale.
+    Estrae tutti i numeri rilevanti da un testo fiscale con normalizzazione.
     
     Cattura:
     - Date (DD/MM/YYYY, DD-MM-YYYY, "1° gennaio 2024")
@@ -81,6 +81,11 @@ def extract_numbers(text: str) -> set:
     - Riferimenti normativi (Art. X, D.L. X/YYYY, L. X/YYYY, comma X)
     - Percentuali (X%, X per cento)
     - Numeri in contesto ("entro X giorni", "X mesi")
+    
+    NORMALIZZAZIONE:
+    - Rimuove punti delle migliaia: 1.000 → 1000
+    - Normalizza decimali: 1,5 → 1.5
+    - Espande riferimenti: Art. 10 → articolo 10
     
     Returns:
         Set di stringhe normalizzate contenenti i numeri trovati
@@ -97,12 +102,26 @@ def extract_numbers(text: str) -> set:
     numbers.update(re.findall(date_long_pattern, text, re.IGNORECASE))
     
     # Importi monetari: € 1.234,56 o 1.234 euro o 1234,56 euro
+    # Normalizza rimuovendo punti migliaia e sostituendo virgola decimale
     money_pattern = r'€\s*[\d.,]+|[\d.,]+\s*(?:euro|EUR)'
-    numbers.update(re.findall(money_pattern, text, re.IGNORECASE))
+    for match in re.findall(money_pattern, text, re.IGNORECASE):
+        # Normalizza: rimuovi punti migliaia se presenti con virgola decimale
+        normalized = match
+        if ',' in match and '.' in match:
+            # Formato italiano: 1.234,56 → 1234.56
+            normalized = match.replace('.', '').replace(',', '.')
+        elif ',' in match:
+            # Solo virgola: 1234,56 → 1234.56
+            normalized = match.replace(',', '.')
+        numbers.add(normalized.lower())
     
     # Riferimenti normativi: Art. 123, D.L. 34/2020, L. 178/2020
-    art_pattern = r'\b(?:Art\.|Articolo)\s*\d+(?:[- ](?:bis|ter|quater))?\b'
-    numbers.update(re.findall(art_pattern, text, re.IGNORECASE))
+    # Aggiungi sia forma abbreviata che estesa
+    art_pattern = r'\b(?:Art\.|Articolo)\s*(\d+)(?:[- ](?:bis|ter|quater))?\b'
+    for match in re.finditer(art_pattern, text, re.IGNORECASE):
+        art_num = match.group(1)
+        numbers.add(f"art. {art_num}")
+        numbers.add(f"articolo {art_num}")
     
     dl_pattern = r'\b(?:D\.L\.|D\.Lgs\.|L\.)\s*\d+/\d{2,4}\b'
     numbers.update(re.findall(dl_pattern, text, re.IGNORECASE))
@@ -112,12 +131,27 @@ def extract_numbers(text: str) -> set:
     numbers.update(re.findall(comma_pattern, text, re.IGNORECASE))
     
     # Percentuali: 110% o 50 per cento
-    perc_pattern = r'\b\d+(?:[.,]\d+)?\s*%|\b\d+(?:[.,]\d+)?\s+per\s+cento\b'
-    numbers.update(re.findall(perc_pattern, text, re.IGNORECASE))
+    perc_pattern = r'\b\d+(?:[.,]\d+)?\s*%|(\b\d+(?:[.,]\d+)?)\s+per\s+cento\b'
+    for match in re.finditer(perc_pattern, text, re.IGNORECASE):
+        if match.group(0).endswith('%'):
+            numbers.add(match.group(0).replace(',', '.'))
+        else:
+            # Aggiungi entrambe le forme
+            num = match.group(1).replace(',', '.')
+            numbers.add(f"{num}%")
+            numbers.add(f"{num} per cento")
     
     # Numeri con context fiscale specifico
-    context_pattern = r'\b\d+(?:[.,]\d+)?\s+(?:giorni|mesi|anni|rate|annualità)\b'
-    numbers.update(re.findall(context_pattern, text, re.IGNORECASE))
+    context_pattern = r'\b(\d+)(?:[.,](\d+))?\s+(giorni|mesi|anni|rate|annualità)\b'
+    for match in re.finditer(context_pattern, text, re.IGNORECASE):
+        full_match = match.group(0).replace(',', '.')
+        numbers.add(full_match.lower())
+        
+        # Aggiungi anche forma scritta per numeri comuni
+        num = int(match.group(1))
+        unit = match.group(3).lower()
+        if num <= 100:  # Solo per numeri piccoli
+            numbers.add(f"{num} {unit}")
     
     # Anni standalone (solo 4 cifre che iniziano con 19xx o 20xx)
     year_pattern = r'\b(?:19|20)\d{2}\b'
@@ -326,7 +360,6 @@ def build_records(window: List[Dict], center_idx: int, llm_output: Dict) -> Tupl
             s1_2_recs.append({
                 "question": q,
                 "docs": current_docs, 
-                "gold_answer": a,
                 "answer": a,
                 "data_type": "qa",
                 "pos_index": current_pos_index,
