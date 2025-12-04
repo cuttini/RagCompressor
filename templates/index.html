@@ -170,6 +170,7 @@
 
         .badge.stage1_raw { background: rgba(79, 143, 255, 0.2); color: var(--accent-blue); }
         .badge.stage1_2 { background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); }
+        .badge.stage3_e2e { background: rgba(6, 182, 212, 0.2); color: #06b6d4; }
         .badge.qa { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); }
         .badge.paraphrase { background: rgba(234, 179, 8, 0.2); color: var(--accent-yellow); }
 
@@ -391,6 +392,7 @@
                     <option value="all" {% if stage_filter == 'all' %}selected{% endif %}>All Stages</option>
                     <option value="stage1_raw" {% if stage_filter == 'stage1_raw' %}selected{% endif %}>Stage 1 Raw</option>
                     <option value="stage1_2" {% if stage_filter == 'stage1_2' %}selected{% endif %}>Stage 1.2</option>
+                    <option value="stage3_e2e" {% if stage_filter == 'stage3_e2e' %}selected{% endif %}>Stage 3 E2E</option>
                 </select>
             </div>
             <div class="filter-group">

@@ -4,6 +4,7 @@ ebooks_seac/
 markdown_seac/
 old/
 tmp/
+goldquestions/
 
 # Python
 __pycache__/

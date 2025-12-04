@@ -60,7 +60,7 @@ def main():
             for q, a in zip(questions, answers):
                 user = USER_TEMPLATE.format(doc=doc, question=q, answer=a)
                 try:
-                    res = client.json_completion(SYSTEM_PROMPT, user)
+                    res, _ = client.json_completion(SYSTEM_PROMPT, user)
                     score = int(res.get("score", 0))
                 except Exception as e:
                     print(f"[WARN] errore validazione: {e}")

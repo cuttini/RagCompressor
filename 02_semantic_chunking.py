@@ -15,6 +15,88 @@ tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, trust_remote_code=True
 def count_tokens(text: str) -> int:
     return len(tokenizer.encode(text, add_special_tokens=False))
 
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split text into sentences using Italian-aware patterns.
+    
+    Handles:
+    - Common Italian abbreviations (art., d.lgs., etc.)
+    - Decimal numbers (e.g., 2.5, 10.000,00)
+    - Legal citations (art. 10, comma 1, etc.)
+    - Uppercase letters after sentence boundaries
+    
+    Args:
+        text: Text to split into sentences
+        
+    Returns:
+        List of sentences (each ending with proper punctuation)
+    """
+    if not text or not text.strip():
+        return []
+    
+    # Two-pass approach to avoid variable-width lookbehind issues:
+    # 1. First, split conservatively at all potential sentence boundaries
+    # 2. Then, merge back splits that were within abbreviations
+    
+    # Common Italian abbreviations (case-insensitive)
+    abbreviations = {
+        'art', 'artt', 'c.c', 'd.lgs', 'd.l', 'd.p.r', 'd.m',
+        'lett', 'co', 'comma', 'commi',
+        'ecc', 'cfr', 'etc', 'es', 'sig', 'sigg', 'prof', 'dott',
+        'ing', 'avv', 'geom', 'arch', 'rag', 'dr', 'mr', 'mrs',
+        'vol', 'cap', 'par', 'fig', 'tab', 'pag', 'pp', 'ss'
+    }
+    
+    #Simple sentence boundary: period/!/? + whitespace + uppercase/asterisk/number
+    # This will over-split (e.g., after abbreviations), which we'll fix next
+    pattern = r'([.!?]["\']{0,2})\s+(?=[A-ZÀÈÉÌÒÙ0-9\*])'
+    
+    parts = re.split(pattern, text)
+    
+    # Reconstruct sentences
+    sentences = []
+    i = 0
+    while i < len(parts):
+        sentence = parts[i]
+        
+        # Add back punctuation if it exists
+        if i + 1 < len(parts) and parts[i + 1] in ['.', '!', '?', '.\"', '!\"', '?\"', '.\'', '!\'', '?\'']:
+            sentence += parts[i + 1]
+            i += 2
+        else:
+            i += 1
+        
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
+        # Check if this is a false split (ends with abbreviation)
+        # Don't split if sentence ends with known abbreviation
+        words = sentence.lower().split()
+        if words and any(words[-1].rstrip('.,;:') in abbreviations for _ in [1]):
+            # This looks like an abbreviation, should merge with next
+            # Store for potential merge
+            if i < len(parts):
+                # Peek at next part and merge if it continues
+                next_part = parts[i].strip() if i < len(parts) else ""
+                if next_part and not next_part[0].isupper():
+                    # Merge this with stored sentence
+                    sentence = sentence + " " + next_part
+                    if i + 1 < len(parts) and parts[i + 1] in ['.', '!', '?']:
+                        sentence += parts[i + 1]
+                        i += 2
+                    else:
+                        i += 1
+        
+        if sentence:
+            sentences.append(sentence)
+    
+    # Handle case where no splits occurred
+    if not sentences and text.strip():
+        sentences = [text.strip()]
+    
+    return sentences
+
 def extract_html_tables(text: str) -> List[tuple]:
     """
     Identifica tutte le tabelle HTML complete nel testo.
@@ -26,7 +108,7 @@ def extract_html_tables(text: str) -> List[tuple]:
         Lista di tuple (start_pos, end_pos, table_html)
     """
     tables = []
-    pattern = r'<table[^>]*>(.*?)</table>'
+    pattern = r'\u003ctable[^\u003e]*\u003e(.*?)\u003c/table\u003e'
     
     for match in re.finditer(pattern, text, re.DOTALL | re.IGNORECASE):
         start_pos = match.start()
@@ -186,6 +268,9 @@ def extract_metadata(filename: str) -> Dict[str, str]:
     source_cleaned = source_cleaned.replace("_", " ")
     # Rimuove suffissi tecnici comuni
     source_cleaned = re.sub(r"\s+(Digitale|PS|UO)\s*$", "", source_cleaned, flags=re.IGNORECASE)
+    # Rimuove l'anno per evitare duplicazione (verrà aggiunto separatamente nell'header)
+    if year != "N/A":
+        source_cleaned = source_cleaned.replace(year, "").strip()
     source_cleaned = source_cleaned.strip()
     
     return {
@@ -194,16 +279,128 @@ def extract_metadata(filename: str) -> Dict[str, str]:
         "source_cleaned": source_cleaned
     }
 
+def split_by_legal_structure(text: str, max_tokens: int) -> List[str]:
+    """
+    Splits legal text intelligently, preserving lettered/numbered subsections.
+    
+    Legal documents use patterns like:
+    - *a)*, *b)*, *c)* ... (lettered items in italics)
+    - 1., 2., 3. ... (numbered items)
+    
+    This function keeps these subsections together as atomic units,
+    only splitting at subsection boundaries when needed.
+    
+    Args:
+        text: Legal text to split
+        max_tokens: Maximum tokens per chunk
+        
+    Returns:
+        List of text chunks respecting legal structure
+    """
+    # Pattern to detect legal subsection boundaries
+    # Matches: "\n*a)", "\n*b)", "\n*m-bis)", etc. at start of line (in italics)
+    # Also matches: "\n1.", "\n2." for numbered items
+    # We need to capture the full delimiter including the newline and asterisk
+    subsection_pattern = r'(\n\*(?:[a-z]|[a-z]+-[a-z]+|[0-9]+)\))'
+    
+    # Check if text contains legal subsections
+    if not re.search(subsection_pattern, text, re.IGNORECASE):
+        # No legal structure, return as-is for normal paragraph splitting
+        return [text]
+    
+    # Split at subsection boundaries while keeping delimiters
+    parts = re.split(subsection_pattern, text, flags=re.IGNORECASE)
+    
+    # Reconstruct subsections (merge delimiter with following content)
+    # parts[0] = preamble
+    # parts[1] = delimiter (e.g., "\n*a)")
+    # parts[2] = content after delimiter
+    # parts[3] = next delimiter
+    # etc.
+    subsections = []
+    
+    # Check if preamble contains legal numbered intro (e.g., "2. *Sono inoltre deducibili:*")
+    # Pattern: digit(s) + period + space + optional italics text + colon/period
+    preamble = parts[0] if parts else ""
+    has_legal_preamble = bool(re.search(r'\d+\.\s+\*?[^*\n]+\*?\s*[:.]?\s*$', preamble.strip(), re.MULTILINE))
+    
+    # If there's a numbered preamble, attach it to the first subsection
+    if has_legal_preamble and len(parts) >= 3:
+        # Combine preamble + first delimiter + first content
+        first_subsection = preamble + parts[1] + parts[2]
+        current_subsection = first_subsection
+        i = 3  # Start from next delimiter
+    else:
+        current_subsection = preamble
+        i = 1
+    
+    while i < len(parts):
+        # parts[i] is the matched delimiter (e.g., "\n*a)")
+        # parts[i+1] is the content following it
+        delimiter = parts[i]
+        content = parts[i + 1] if i + 1 < len(parts) else ""
+        
+        # Combine delimiter + content as one subsection
+        subsection_text = delimiter + content
+        
+        # Check if adding this to current would exceed max_tokens
+        candidate = current_subsection + subsection_text
+        
+        if current_subsection and count_tokens(candidate) > max_tokens:
+            # Flush current subsection and start new one
+            if current_subsection.strip():
+                subsections.append(current_subsection.strip())
+            current_subsection = subsection_text
+        else:
+            # Add to current subsection
+            current_subsection = candidate
+        
+        i += 2  # Skip both delimiter and content
+    
+    # Flush remaining content
+    if current_subsection.strip():
+        subsections.append(current_subsection.strip())
+    
+    return subsections if subsections else [text]
+
+
 def split_long_text(text: str, max_tokens: int) -> List[str]:
     """
     Splits text into sub-paragraphs to respect max_tokens.
+    LEGAL-AWARE: Preserves lettered subsections (a), b), c)) as atomic units.
     TABLE-AWARE: Preserves complete HTML tables without fragmentation.
     
     Strategy:
-    1. Extract all complete tables from text
-    2. Replace tables with placeholders 
-    3. Split remaining text by paragraphs normally
-    4. Restore tables as dedicated chunks
+    1. Try legal-aware splitting first (for legal documents)
+    2. Extract all complete tables from text
+    3. Replace tables with placeholders 
+    4. Split remaining text by paragraphs normally
+    5. Restore tables as dedicated chunks
+    """
+    # STEP 0: Try legal-aware splitting first
+    # This handles legal documents with lettered/numbered subsections
+    legal_chunks = split_by_legal_structure(text, max_tokens)
+    
+    # If legal splitting produced multiple chunks, we need to further process each
+    # Otherwise, continue with normal table-aware splitting
+    if len(legal_chunks) > 1:
+        # Legal structure detected and split - now process each chunk for tables
+        final_chunks = []
+        for legal_chunk in legal_chunks:
+            # Process each legal chunk for tables (recursive call with single chunk)
+            # Skip legal splitting on recursion to avoid infinite loop
+            sub_chunks = _split_with_tables(legal_chunk, max_tokens)
+            final_chunks.extend(sub_chunks)
+        return final_chunks
+    
+    # No legal structure, proceed with normal table-aware splitting
+    return _split_with_tables(text, max_tokens)
+
+
+def _split_with_tables(text: str, max_tokens: int) -> List[str]:
+    """
+    Helper function for table-aware splitting (extracted from split_long_text).
+    This is called recursively on each legal chunk.
     """
     # 1. Extract complete tables and replace with placeholders
     tables = extract_html_tables(text)
@@ -223,7 +420,8 @@ def split_long_text(text: str, max_tokens: int) -> List[str]:
                 current = candidate
             else:
                 if not current:
-                    sentences = re.split(r"(?<=[\.\?\!])\s+", p)
+                    # Paragraph too large - split by sentences using Italian-aware tokenizer
+                    sentences = split_into_sentences(p)
                     sent_buf = ""
                     for s in sentences:
                         cand2 = (sent_buf + " " + s).strip() if sent_buf else s.strip()
@@ -449,8 +647,9 @@ def chunk_markdown(md_text: str, source_file: str) -> List[Dict]:
                 continue
             
             # INIETTA HEADER DI METADATI STRUTTURATI (Compact format)
-            # Old format: ~100 tokens, New format: ~20-30 tokens
-            metadata_header = f"> {metadata['source_cleaned']} {metadata['year']} | {metadata['topic']} | {section_title} (p.{page_number}) <\n\n"
+            # Old format: ~100 tokens, New format: ~15-20 tokens
+            # Title is already in markdown header below, no need to duplicate
+            metadata_header = f"> {metadata['source_cleaned']} {metadata['year']} | {metadata['topic']} | p.{page_number} <\n\n"
             
             # Assembla il contenuto finale con header + titolo + testo
             final_content = f"{metadata_header}{title.strip()}\n\n{sub.strip()}"

@@ -1,0 +1,15 @@
+{
+  "last_processed_idx": 71,
+  "total_windows": 50664,
+  "processed_count": 75,
+  "timestamp": "2025-12-04T21:32:58.819843",
+  "stats": {
+    "processed": 75,
+    "errors": 0,
+    "total_qas": 671,
+    "rejected_qas": 183,
+    "total_tokens": 331895,
+    "prompt_tokens": 234682,
+    "completion_tokens": 97213
+  }
+}

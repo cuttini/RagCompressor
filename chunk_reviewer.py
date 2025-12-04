@@ -15,6 +15,7 @@ app = Flask(__name__)
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 STAGE1_RAW = ARTIFACTS_DIR / "stage1_raw.jsonl"
 STAGE1_2 = ARTIFACTS_DIR / "stage1_2_instruction.jsonl"
+STAGE3_E2E = ARTIFACTS_DIR / "stage3_end_to_end.jsonl"
 REVIEW_STATUS_FILE = ARTIFACTS_DIR / "review_status.json"
 ITEMS_PER_PAGE = 10
 
@@ -24,7 +25,7 @@ review_status = {}
 
 
 def load_chunks():
-    """Load chunks from both JSONL files."""
+    """Load chunks from all JSONL files."""
     global chunks
     chunks = []
     
@@ -46,6 +47,16 @@ def load_chunks():
                     chunk = json.loads(line)
                     chunk['_id'] = f"s2_{idx}"
                     chunk['_stage'] = 'stage1_2'
+                    chunks.append(chunk)
+    
+    # Load stage3_end_to_end
+    if STAGE3_E2E.exists():
+        with open(STAGE3_E2E, 'r', encoding='utf-8') as f:
+            for idx, line in enumerate(f):
+                if line.strip():
+                    chunk = json.loads(line)
+                    chunk['_id'] = f"s3_{idx}"
+                    chunk['_stage'] = 'stage3_e2e'
                     chunks.append(chunk)
     
     print(f"Loaded {len(chunks)} chunks total")

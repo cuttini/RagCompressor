@@ -27,8 +27,8 @@ class QwenClient:
         user_prompt: str,
         temperature: float = 0.3,
         max_tokens: int = 2048,
-    ) -> Dict[str, Any]:
-        """Chiamata Qwen in JSON mode con retry."""
+    ) -> tuple[Dict[str, Any], Dict[str, int]]:
+        """Chiamata Qwen in JSON mode con retry. Restituisce (parsed_json, usage_stats)."""
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -40,7 +40,17 @@ class QwenClient:
             response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content
-        return self._safe_json_parse(content)
+        parsed_json = self._safe_json_parse(content)
+        
+        # Estrai statistiche token usage
+        usage = resp.usage
+        usage_stats = {
+            'prompt_tokens': usage.prompt_tokens if usage else 0,
+            'completion_tokens': usage.completion_tokens if usage else 0,
+            'total_tokens': usage.total_tokens if usage else 0
+        }
+        
+        return parsed_json, usage_stats
 
     @staticmethod
     def _safe_json_parse(content: str) -> Dict[str, Any]:

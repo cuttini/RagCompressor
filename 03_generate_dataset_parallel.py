@@ -11,20 +11,23 @@ from datetime import datetime
 from config import CHUNKS_PATH, STAGE1_RAW_PATH, STAGE1_2_PATH, WINDOW_SIZE, MIN_WINDOW_SIZE, MAX_WINDOW_SIZE
 from llm_client import QwenClient
 
+# Checkpoint file path
+CHECKPOINT_PATH = Path("output/checkpoint.json")
+
 # === PROMPTS ===
 SYSTEM_PROMPT = (
     "Sei un esperto fiscalista italiano e docente per l'esame di abilitazione.\n"
     "Riceverai una sequenza di estratti (chunk) da manuali SEAC. "
     "Il tuo compito è generare dataset per il training di un'IA fiscale.\n"
     "Devi prestare massima attenzione a:\n"
-    "1. Collegamenti logici tra i chunk (domande multi-hop).\n"
-    "2. Aspetti temporali (abrogazioni, entrate in vigore, regimi transitori).\n"
-    "3. Accuratezza normativa.\n"
+    "1. REALISMO PROFESSIONALE: Le domande devono riflettere dubbi reali di commercialisti e operatori CAF. "
+    "Usa un linguaggio tecnico ma pratico. Evita domande scolastiche o puramente definitorie.\n"
+    "2. SPECIFICITÀ DEI MODELLI: Se il testo cita quadri, righi o codici (es. 'Quadro RN', 'Rigo 20', 'Codice 12'), "
+    "la domanda DEVE essere specifica (es. 'Dove va indicato X?', 'Cosa inserire nel rigo Y?').\n"
+    "3. SCENARI PRATICI: Prediligi domande basate su casi d'uso (es. 'Il mio cliente ha fatto X, può detrarre Y?').\n"
     "4. PRESERVAZIONE NUMERI: Tutti i numeri (date, importi, riferimenti normativi) "
-    "presenti nella domanda DEVONO essere presenti nella risposta. "
-    "NON omettere, arrotondare o approssimare valori numerici.\n"
-    "5. NATURALEZZA: NON fare mai riferimento a 'chunk', 'contesto', 'estratto' o simili. "
-    "Le domande e risposte devono essere naturali, come se fossero poste da professionista fiscalista."
+    "presenti nella domanda DEVONO essere presenti nella risposta.\n"
+    "5. NATURALEZZA: NON fare mai riferimento a 'chunk', 'contesto', 'estratto'. "
 )
 
 USER_TEMPLATE = """
@@ -36,36 +39,62 @@ CONTESTO NORMATIVO (Sliding Window di {window_size} chunk):
 
 COMPITI (Rispondi ESCLUSIVAMENTE con un JSON valido):
 
-Genera i seguenti tipi di Q&A basandoti sul testo fornito.
-Focalizzati principalmente sul CHUNK CENTRALE (Chunk #{center_id}), ma usa i chunk circostanti per contesto, disambiguazione o domande di collegamento.
+Genera Q&A basate sul testo fornito, focalizzandoti sul CHUNK CENTRALE (Chunk #{center_id}).
 
-IMPORTANTE: Nelle risposte (campo "a"), cita esplicitamente la fonte normativa se presente nel testo (es. "Secondo l'Art. 10...").
+LINEE GUIDA PER DOMANDE "REALI" (Basate su Benchmark):
+- EVITA: "Cosa dice il testo riguardo X?", "Definisci X."
+- PREFERISCI: "Un contribuente che ha X, come deve comportarsi?", "In quale rigo del modello Redditi va indicato X?", "La detrazione Y spetta anche se...?"
+
+CATEGORIE RICHIESTE (Genera 2-3 domande miste scegliendo tra queste tipologie, se applicabili):
+
+1. "form_loc_qa" (Form/Field Location):
+   - CHIEDI DOVE VANNO INSERITI I DATI (Quadro, Rigo, Codice).
+   - Esempio: "In quale rigo del quadro RN si indica l'eccedenza?"
+   - *Usa SOLO se il testo cita quadri/righi.*
+
+2. "deadline_qa" (Deadline/Time):
+   - Domande su date, scadenze, termini o durate.
+   - Esempio: "Entro quale data va inviata la comunicazione?", "Quanti giorni di preavviso servono?"
+   - *Usa SOLO se il testo cita date/termini.*
+
+3. "scenario_qa" (Scenario/Case Study):
+   - Domande ipotetiche su casi concreti.
+   - Esempio: "Se una SRL ha optato per..., può...?", "In caso di decesso del titolare, gli eredi devono...?"
+
+4. "boolean_qa" (Yes/No with Explanation):
+   - Domande su permessi, obblighi o possibilità.
+   - Esempio: "È possibile detrarre le spese per...?", "Il contribuente è obbligato a...?"
+   - *La risposta deve iniziare con "Sì," o "No," seguita dalla spiegazione.*
+
+5. "procedure_qa" (Procedure/Calculation):
+   - Domande su "come fare" o "come calcolare".
+   - Esempio: "Come si determina la base imponibile per...?", "Qual è la procedura per richiedere...?"
+
+ALTRE CATEGORIE (1 per tipo, se applicabile):
+- "complex_qas": 1 domanda complessa che richiede ragionamento articolato.
+- "multi_hop_qas": 1 domanda di collegamento tra sezioni diverse.
+- "evolution_qas": Se nel contesto ci sono riferimenti a normative precedenti, cambi di anno o modifiche legislative, 
+  genera 1 domanda che chieda esplicitamente la differenza o l'evoluzione nel tempo.
+  Esempio: "Come è cambiata la deducibilità tra il 2023 e il 2024?", "Quali sono le differenze rispetto alla normativa precedente?"
+  *Usa SOLO se il testo contiene riferimenti temporali/normativi multipli.*
+- "paraphrase": Una riscrittura discorsiva e completa del contenuto principale.
 
 REGOLA CRITICA - PRESERVAZIONE NUMERI:
-Se la domanda contiene numeri (date, importi, articoli di legge, percentuali), 
-la risposta DEVE includere esattamente gli stessi valori numerici.
-Esempio: Se chiedi "Qual è la scadenza del 31/12/2023?", la risposta DEVE contenere "31/12/2023".
-NON approssimare, NON arrotondare, NON omettere mai i numeri.
+Se la domanda contiene numeri (date, importi, articoli), la risposta DEVE includerli esattamente.
 
 REGOLA CRITICA - NATURALEZZA:
-NON menzionare MAI termini tecnici come "chunk", "chunk centrale", "chunk precedente", 
-"contesto", "estratto", "sliding window" nelle domande o risposte.
-Le Q&A devono sembrare domande reali poste da un professionista fiscalista.
-ESEMPIO SBAGLIATO: "Qual è il titolo del chunk centrale?"
-ESEMPIO CORRETTO: "Qual è l'argomento principale trattato in questo manuale?"
-
-1. "simple_qas": 2 domande atomiche (definizioni, aliquote, scadenze) basate sul testo principale.
-2. "complex_qas": 1 domanda complessa (calcolo, scenario pratico).
-3. "temporal_qas": 1 domanda (SE APPLICABILE) che riguarda date, entrate in vigore, abrogazioni o validità temporale. Se non ci sono riferimenti temporali rilevanti, lascia la lista vuota.
-4. "multi_hop_qas": 1 domanda (SE APPLICABILE) che richiede di collegare informazioni tra sezioni diverse del testo.
-5. "paraphrase": Una riscrittura discorsiva e completa del contenuto principale del testo.
+MAI usare termini come "chunk", "testo", "estratto". Immagina di parlare con un collega.
 
 Schema JSON atteso:
 {{
-  "simple_qas": [{{"q": "...", "a": "..."}}, ...],
+  "mixed_qas": [
+      {{"type": "form_loc_qa", "q": "...", "a": "..."}},
+      {{"type": "scenario_qa", "q": "...", "a": "..."}}
+      // Inserisci 2-3 domande di tipi diversi
+  ],
   "complex_qas": [{{"q": "...", "a": "..."}}],
-  "temporal_qas": [{{"q": "...", "a": "..."}}],   // Opzionale, vuoto se non pertinente
-  "multi_hop_qas": [{{"q": "...", "a": "..."}}],  // Opzionale, vuoto se non pertinente
+  "multi_hop_qas": [{{"q": "...", "a": "..."}}],
+  "evolution_qas": [{{"q": "...", "a": "..."}}],
   "paraphrase": "..."
 }}
 """
@@ -300,9 +329,12 @@ def build_records(window: List[Dict], center_idx: int, llm_output: Dict) -> Tupl
     center_text = center_chunk["content"]
     full_window_texts = [chunk["content"] for chunk in window]
     
-    # STAGE 1
+    # STAGE 1 - MIXED QAs (ex simple_qas)
     s1_qas = []
-    for item in (llm_output.get("simple_qas") or []):
+    # Supporta sia il vecchio formato "simple_qas" che il nuovo "mixed_qas" per compatibilità
+    mixed_source = llm_output.get("mixed_qas") or llm_output.get("simple_qas") or []
+    
+    for item in mixed_source:
         if "q" in item and "a" in item:
             q, a = item["q"].strip(), item["a"].strip()
             validation_stats['total_qas'] += 1
@@ -336,11 +368,15 @@ def build_records(window: List[Dict], center_idx: int, llm_output: Dict) -> Tupl
         })
 
     # STAGE 1.2
-    all_categories = ["simple_qas", "complex_qas", "temporal_qas", "multi_hop_qas"]
+    # Includiamo anche "mixed_qas" per avere i singoli record
+    all_categories = ["mixed_qas", "simple_qas", "complex_qas", "multi_hop_qas", "evolution_qas"]
     
     for cat in all_categories:
-        for item in (llm_output.get(cat) or []):
+        source_list = llm_output.get(cat) or []
+        for item in source_list:
             q, a = item.get("q", "").strip(), item.get("a", "").strip()
+            qa_type = item.get("type", cat) # Usa il tipo specifico se presente (es. "form_loc_qa"), altrimenti la categoria
+            
             if not q or not a:
                 continue
             
@@ -353,7 +389,7 @@ def build_records(window: List[Dict], center_idx: int, llm_output: Dict) -> Tupl
                 validation_stats['rejected_details'].append((q, a, missing))
                 continue  # Scarta questa Q&A
                 
-            is_context_heavy = cat in ["multi_hop_qas", "temporal_qas", "complex_qas"]
+            is_context_heavy = cat in ["multi_hop_qas", "complex_qas", "evolution_qas"]
             current_docs = full_window_texts if is_context_heavy else [center_text]
             current_pos_index = [i for i in range(len(current_docs))] if is_context_heavy else [0]
 
@@ -363,30 +399,37 @@ def build_records(window: List[Dict], center_idx: int, llm_output: Dict) -> Tupl
                 "answer": a,
                 "data_type": "qa",
                 "pos_index": current_pos_index,
-                "metadata": {"type": cat, "source_chunk_id": center_chunk["id"]}
+                "metadata": {"type": qa_type, "source_chunk_id": center_chunk["id"]}
             })
 
     return s1_recs, s1_2_recs, validation_stats
 
 
 class DatasetGenerator:
-    def __init__(self, max_workers: int = 4, timeout: int = 120):
+    def __init__(self, max_workers: int = 4, timeout: int = 120, enable_resume: bool = True):
         """
         Args:
             max_workers: Numero di thread paralleli per chiamate LLM
             timeout: Timeout in secondi per ogni chiamata LLM
+            enable_resume: Abilita il resume automatico tramite checkpoint
         """
         self.max_workers = max_workers
         self.timeout = timeout
+        self.enable_resume = enable_resume
         self.write_lock = Lock()
+        self.checkpoint_lock = Lock()
         self.stats = {
             'processed': 0,
             'errors': 0,
             'total_time': 0.0,
             'total_qas': 0,
             'rejected_qas': 0,
-            'rejected_samples': []  # Log fino a 10 esempi di rigetto
+            'rejected_samples': [],  # Log fino a 10 esempi di rigetto
+            'total_tokens': 0,
+            'prompt_tokens': 0,
+            'completion_tokens': 0
         }
+        self.processed_indices = set()  # Track processed window indices
     
     def process_window(
         self,
@@ -412,7 +455,7 @@ class DatasetGenerator:
         
         start = datetime.now()
         try:
-            raw_out = client.json_completion(SYSTEM_PROMPT, user_prompt)
+            raw_out, usage_stats = client.json_completion(SYSTEM_PROMPT, user_prompt)
             out = raw_out if isinstance(raw_out, dict) else clean_and_parse_json(raw_out)
             
             elapsed = (datetime.now() - start).total_seconds()
@@ -426,6 +469,9 @@ class DatasetGenerator:
                 self.stats['total_time'] += elapsed
                 self.stats['total_qas'] += val_stats['total_qas']
                 self.stats['rejected_qas'] += val_stats['rejected_qas']
+                self.stats['total_tokens'] += usage_stats['total_tokens']
+                self.stats['prompt_tokens'] += usage_stats['prompt_tokens']
+                self.stats['completion_tokens'] += usage_stats['completion_tokens']
                 
                 # Salva fino a 10 esempi di rigetto per debugging
                 if len(self.stats['rejected_samples']) < 10:
@@ -464,6 +510,51 @@ class DatasetGenerator:
             with open(s1_2_file, "a", encoding="utf-8") as f2:
                 for rec in s1_2_records:
                     f2.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    
+    def save_checkpoint(self, processed_idx: int, total_windows: int):
+        """Salva il checkpoint con l'indice dell'ultima finestra processata."""
+        if not self.enable_resume:
+            return
+            
+        with self.checkpoint_lock:
+            checkpoint_data = {
+                'last_processed_idx': processed_idx,
+                'total_windows': total_windows,
+                'processed_count': len(self.processed_indices),
+                'timestamp': datetime.now().isoformat(),
+                'stats': {
+                    'processed': self.stats['processed'],
+                    'errors': self.stats['errors'],
+                    'total_qas': self.stats['total_qas'],
+                    'rejected_qas': self.stats['rejected_qas'],
+                    'total_tokens': self.stats['total_tokens'],
+                    'prompt_tokens': self.stats['prompt_tokens'],
+                    'completion_tokens': self.stats['completion_tokens']
+                }
+            }
+            
+            CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(CHECKPOINT_PATH, 'w', encoding='utf-8') as f:
+                json.dump(checkpoint_data, f, ensure_ascii=False, indent=2)
+    
+    @staticmethod
+    def load_checkpoint() -> dict:
+        """Carica il checkpoint salvato, se esiste."""
+        if CHECKPOINT_PATH.exists():
+            try:
+                with open(CHECKPOINT_PATH, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[WARN] Impossibile caricare checkpoint: {e}")
+                return None
+        return None
+    
+    @staticmethod
+    def clear_checkpoint():
+        """Rimuove il file di checkpoint."""
+        if CHECKPOINT_PATH.exists():
+            CHECKPOINT_PATH.unlink()
+            print("[INFO] Checkpoint cleared.")
     
     def generate_dataset(
         self,
@@ -511,11 +602,17 @@ class DatasetGenerator:
                         # Scrivi i risultati
                         self.write_records(s1, s1_2, STAGE1_RAW_PATH, STAGE1_2_PATH)
                         
+                        # Traccia indice processato e salva checkpoint
+                        self.processed_indices.add(original_idx)
+                        self.save_checkpoint(original_idx, len(windows))
+                        
                         # Aggiorna progress bar con statistiche
                         avg_time = self.stats['total_time'] / self.stats['processed'] if self.stats['processed'] > 0 else 0
                         rejection_rate = (self.stats['rejected_qas'] / self.stats['total_qas'] * 100) if self.stats['total_qas'] > 0 else 0
+                        tokens_per_sec = self.stats['total_tokens'] / self.stats['total_time'] if self.stats['total_time'] > 0 else 0
                         pbar.set_postfix({
                             'avg_time': f'{avg_time:.1f}s',
+                            'tokens/s': f'{tokens_per_sec:.1f}',
                             'errors': self.stats['errors'],
                             'reject%': f'{rejection_rate:.1f}%',
                             'last_idx': original_idx
@@ -527,6 +624,15 @@ class DatasetGenerator:
         print(f"\n[STATS] Completato:")
         print(f"  - Processate: {self.stats['processed']}")
         print(f"  - Errori: {self.stats['errors']}")
+        
+        # Statistiche token
+        print(f"\n[TOKENS] Utilizzo Token:")
+        print(f"  - Token totali: {self.stats['total_tokens']:,}")
+        print(f"  - Prompt tokens: {self.stats['prompt_tokens']:,}")
+        print(f"  - Completion tokens: {self.stats['completion_tokens']:,}")
+        if self.stats['total_time'] > 0:
+            tokens_per_sec = self.stats['total_tokens'] / self.stats['total_time']
+            print(f"  - Throughput: {tokens_per_sec:.1f} tokens/s")
         
         # Statistiche validazione numeri
         print(f"\n[VALIDATION] Preservazione Numeri (HARD mode):")
@@ -578,6 +684,10 @@ def main():
         "--clear", action="store_true",
         help="Cancella output esistenti e ricomincia da zero"
     )
+    parser.add_argument(
+        "--no-resume", action="store_true",
+        help="Disabilita il resume automatico (default: resume abilitato)"
+    )
     
     args = parser.parse_args()
     
@@ -606,19 +716,42 @@ def main():
     print(f"[INFO] Window size stats: min={min_win_size}, max={max_win_size}, avg={avg_window_size:.1f}")
     print(f"[INFO] Configured range: MIN_WINDOW_SIZE={MIN_WINDOW_SIZE}, MAX_WINDOW_SIZE={MAX_WINDOW_SIZE}")
     
-    # Gestisci clear o resume
-    if args.clear or args.start == 0:
-        print("[INFO] Clearing output files...")
+    # Gestisci resume automatico
+    enable_resume = not args.no_resume
+    resume_idx = args.start
+    
+    if args.clear:
+        print("[INFO] Clearing output files and checkpoint...")
         with open(STAGE1_RAW_PATH, "w", encoding="utf-8") as f1:
             pass
         with open(STAGE1_2_PATH, "w", encoding="utf-8") as f2:
             pass
+        DatasetGenerator.clear_checkpoint()
+        resume_idx = 0
+    elif enable_resume and args.start == 0:
+        # Carica checkpoint automaticamente solo se non è stato specificato --start
+        checkpoint = DatasetGenerator.load_checkpoint()
+        if checkpoint:
+            resume_idx = checkpoint['last_processed_idx'] + 1
+            print(f"[INFO] Auto-resume attivato: ripresa dall'indice {resume_idx}")
+            print(f"[INFO] Checkpoint precedente: {checkpoint['processed_count']} finestre processate")
+            print(f"[INFO] Timestamp: {checkpoint['timestamp']}")
+        else:
+            print("[INFO] Nessun checkpoint trovato, partenza da zero")
+            resume_idx = 0
+    elif args.start > 0:
+        print(f"[INFO] Resume manuale dall'indice {resume_idx}")
     else:
-        print(f"[INFO] Resuming from index {args.start}")
+        print("[INFO] Resume disabilitato, partenza da zero")
+        resume_idx = 0
     
     # Genera dataset
-    generator = DatasetGenerator(max_workers=args.workers, timeout=args.timeout)
-    generator.generate_dataset(windows, start_idx=args.start, limit=args.limit)
+    generator = DatasetGenerator(
+        max_workers=args.workers, 
+        timeout=args.timeout,
+        enable_resume=enable_resume
+    )
+    generator.generate_dataset(windows, start_idx=resume_idx, limit=args.limit)
     
     print(f"\n[SUCCESS] Output salvati in:")
     print(f"  - {STAGE1_RAW_PATH}")
