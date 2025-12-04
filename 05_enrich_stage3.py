@@ -33,8 +33,9 @@ def tokenize_italian(text: str) -> list:
     Returns:
         List of normalized/stemmed tokens
     """
-    # Remove punctuation and lowercase
-    text = text.lower().translate(str.maketrans('', '', string.punctuation))
+    # Replace punctuation with spaces (not remove) to avoid token merging
+    # Example: "l'art.10" → "l art 10" (not "lart10")
+    text = text.lower().translate(str.maketrans(string.punctuation, ' ' * len(string.punctuation)))
     tokens = text.split()
     
     if USE_STEMMER:
