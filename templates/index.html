@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CLaRa Chunk Reviewer</title>
+    <style>
+        :root {
+            --bg-primary: #0f0f17;
+            --bg-secondary: #1a1a2e;
+            --bg-card: #16213e;
+            --text-primary: #e8e8e8;
+            --text-secondary: #a0a0a0;
+            --accent-blue: #4f8fff;
+            --accent-green: #22c55e;
+            --accent-red: #ef4444;
+            --accent-yellow: #eab308;
+            --accent-purple: #8b5cf6;
+            --border-color: #2a2a4a;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            margin-bottom: 30px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* Stats Bar */
+        .stats-bar {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .stat-item {
+            padding: 10px 20px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .stat-item .label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .stat-item .value {
+            font-weight: 700;
+            font-size: 1.2rem;
+        }
+
+        .stat-item.approved .value { color: var(--accent-green); }
+        .stat-item.rejected .value { color: var(--accent-red); }
+        .stat-item.flagged .value { color: var(--accent-yellow); }
+        .stat-item.pending .value { color: var(--text-secondary); }
+
+        /* Filters */
+        .filters {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .filter-group label {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        select {
+            padding: 10px 15px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+
+        select:hover, select:focus {
+            border-color: var(--accent-blue);
+            outline: none;
+        }
+
+        /* Chunk Cards */
+        .chunks-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+        }
+
+        .chunk-card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 25px;
+            border: 1px solid var(--border-color);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .chunk-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .chunk-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .chunk-badges {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge.stage1_raw { background: rgba(79, 143, 255, 0.2); color: var(--accent-blue); }
+        .badge.stage1_2 { background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); }
+        .badge.qa { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); }
+        .badge.paraphrase { background: rgba(234, 179, 8, 0.2); color: var(--accent-yellow); }
+
+        .status-badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-badge.approved { background: var(--accent-green); color: white; }
+        .status-badge.rejected { background: var(--accent-red); color: white; }
+        .status-badge.flagged { background: var(--accent-yellow); color: black; }
+        .status-badge.pending { background: var(--text-secondary); color: var(--bg-primary); }
+
+        .chunk-section {
+            margin-bottom: 20px;
+        }
+
+        .section-label {
+            font-size: 0.8rem;
+            color: var(--accent-blue);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .question-text {
+            font-size: 1.1rem;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .answer-text {
+            color: var(--text-primary);
+            background: rgba(34, 197, 94, 0.05);
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 3px solid var(--accent-green);
+        }
+
+        .doc-text {
+            color: var(--text-secondary);
+            background: var(--bg-secondary);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 0.9rem;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .doc-text .metadata-header {
+            color: var(--accent-purple);
+            font-weight: 600;
+        }
+
+        /* Action Buttons */
+        .chunk-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .action-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .action-btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .action-btn.approve {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--accent-green);
+            border: 1px solid var(--accent-green);
+        }
+
+        .action-btn.approve:hover, .action-btn.approve.active {
+            background: var(--accent-green);
+            color: white;
+        }
+
+        .action-btn.reject {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--accent-red);
+            border: 1px solid var(--accent-red);
+        }
+
+        .action-btn.reject:hover, .action-btn.reject.active {
+            background: var(--accent-red);
+            color: white;
+        }
+
+        .action-btn.flag {
+            background: rgba(234, 179, 8, 0.15);
+            color: var(--accent-yellow);
+            border: 1px solid var(--accent-yellow);
+        }
+
+        .action-btn.flag:hover, .action-btn.flag.active {
+            background: var(--accent-yellow);
+            color: black;
+        }
+
+        /* Pagination */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-top: 40px;
+            padding: 20px 0;
+        }
+
+        .page-btn {
+            padding: 10px 18px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .page-btn:hover {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+
+        .page-btn.disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .page-info {
+            color: var(--text-secondary);
+            padding: 0 20px;
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state h3 {
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+        }
+
+        /* Toast Notification */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            padding: 15px 25px;
+            background: var(--bg-card);
+            border: 1px solid var(--accent-green);
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-weight: 500;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s;
+            z-index: 1000;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>🔍 CLaRa Chunk Reviewer</h1>
+            <div class="stats-bar">
+                <div class="stat-item approved">
+                    <span class="label">Approved</span>
+                    <span class="value" id="stat-approved">{{ stats.approved }}</span>
+                </div>
+                <div class="stat-item rejected">
+                    <span class="label">Rejected</span>
+                    <span class="value" id="stat-rejected">{{ stats.rejected }}</span>
+                </div>
+                <div class="stat-item flagged">
+                    <span class="label">Flagged</span>
+                    <span class="value" id="stat-flagged">{{ stats.flagged }}</span>
+                </div>
+                <div class="stat-item pending">
+                    <span class="label">Pending</span>
+                    <span class="value" id="stat-pending">{{ stats.pending }}</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="filters">
+            <div class="filter-group">
+                <label>Stage:</label>
+                <select id="filter-stage" onchange="applyFilters()">
+                    <option value="all" {% if stage_filter == 'all' %}selected{% endif %}>All Stages</option>
+                    <option value="stage1_raw" {% if stage_filter == 'stage1_raw' %}selected{% endif %}>Stage 1 Raw</option>
+                    <option value="stage1_2" {% if stage_filter == 'stage1_2' %}selected{% endif %}>Stage 1.2</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Type:</label>
+                <select id="filter-type" onchange="applyFilters()">
+                    <option value="all" {% if type_filter == 'all' %}selected{% endif %}>All Types</option>
+                    <option value="qa" {% if type_filter == 'qa' %}selected{% endif %}>Q&A</option>
+                    <option value="paraphrase" {% if type_filter == 'paraphrase' %}selected{% endif %}>Paraphrase</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Status:</label>
+                <select id="filter-status" onchange="applyFilters()">
+                    <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All Status</option>
+                    <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>Pending</option>
+                    <option value="approved" {% if status_filter == 'approved' %}selected{% endif %}>Approved</option>
+                    <option value="rejected" {% if status_filter == 'rejected' %}selected{% endif %}>Rejected</option>
+                    <option value="flagged" {% if status_filter == 'flagged' %}selected{% endif %}>Flagged</option>
+                </select>
+            </div>
+            <div class="filter-group" style="margin-left: auto;">
+                <span style="color: var(--text-secondary);">Showing {{ chunks|length }} of {{ total }} chunks</span>
+            </div>
+        </div>
+
+        <div class="chunks-grid">
+            {% if chunks %}
+                {% for chunk in chunks %}
+                <div class="chunk-card" data-id="{{ chunk._id }}">
+                    <div class="chunk-header">
+                        <div class="chunk-badges">
+                            <span class="badge {{ chunk._stage }}">{{ chunk._stage }}</span>
+                            <span class="badge {{ chunk.data_type }}">{{ chunk.data_type }}</span>
+                        </div>
+                        <span class="status-badge {{ chunk._status }}" id="status-{{ chunk._id }}">{{ chunk._status }}</span>
+                    </div>
+
+                    <div class="chunk-section">
+                        <div class="section-label">Question</div>
+                        <div class="question-text">
+                            {% if chunk.question is string %}
+                                {{ chunk.question or "(Paraphrase - no question)" }}
+                            {% else %}
+                                {{ chunk.question[0] if chunk.question else "(No question)" }}
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="chunk-section">
+                        <div class="section-label">Answer</div>
+                        <div class="answer-text">
+                            {% if chunk.answers is defined %}
+                                {{ chunk.answers[0] if chunk.answers else chunk.answer }}
+                            {% else %}
+                                {{ chunk.answer }}
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="chunk-section">
+                        <div class="section-label">Source Documents ({{ chunk.docs|length if chunk.docs else 0 }})</div>
+                        {% if chunk.docs %}
+                            {% for doc in chunk.docs %}
+                            <div class="doc-text" style="{% if not loop.first %}margin-top: 10px;{% endif %}">
+                                <div style="color: var(--accent-blue); font-size: 0.8rem; margin-bottom: 8px;">📄 Document {{ loop.index }}</div>
+                                {{ doc }}
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="doc-text">(No source)</div>
+                        {% endif %}
+                    </div>
+
+                    <div class="chunk-actions">
+                        <button class="action-btn approve {% if chunk._status == 'approved' %}active{% endif %}" 
+                                onclick="setReview('{{ chunk._id }}', 'approved')">
+                            ✅ Approve
+                        </button>
+                        <button class="action-btn reject {% if chunk._status == 'rejected' %}active{% endif %}"
+                                onclick="setReview('{{ chunk._id }}', 'rejected')">
+                            ❌ Reject
+                        </button>
+                        <button class="action-btn flag {% if chunk._status == 'flagged' %}active{% endif %}"
+                                onclick="setReview('{{ chunk._id }}', 'flagged')">
+                            ⚠️ Flag
+                        </button>
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty-state">
+                    <h3>No chunks found</h3>
+                    <p>Try adjusting your filters to see more results.</p>
+                </div>
+            {% endif %}
+        </div>
+
+        {% if total > 0 %}
+        <div class="pagination">
+            <a href="?page={{ page - 1 }}&stage={{ stage_filter }}&type={{ type_filter }}&status={{ status_filter }}" 
+               class="page-btn {% if page <= 1 %}disabled{% endif %}">← Previous</a>
+            <span class="page-info">Page {{ page }} of {{ total_pages }}</span>
+            <a href="?page={{ page + 1 }}&stage={{ stage_filter }}&type={{ type_filter }}&status={{ status_filter }}" 
+               class="page-btn {% if page >= total_pages %}disabled{% endif %}">Next →</a>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="toast" id="toast">Saved!</div>
+
+    <script>
+        function applyFilters() {
+            const stage = document.getElementById('filter-stage').value;
+            const type = document.getElementById('filter-type').value;
+            const status = document.getElementById('filter-status').value;
+            window.location.href = `?stage=${stage}&type=${type}&status=${status}`;
+        }
+
+        function setReview(chunkId, status) {
+            fetch('/api/review', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({chunk_id: chunkId, status: status})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    // Update status badge
+                    const badge = document.getElementById(`status-${chunkId}`);
+                    badge.className = `status-badge ${status}`;
+                    badge.textContent = status;
+
+                    // Update buttons
+                    const card = document.querySelector(`[data-id="${chunkId}"]`);
+                    card.querySelectorAll('.action-btn').forEach(btn => btn.classList.remove('active'));
+                    card.querySelector(`.action-btn.${status === 'approved' ? 'approve' : status === 'rejected' ? 'reject' : 'flag'}`).classList.add('active');
+
+                    // Update stats
+                    document.getElementById('stat-approved').textContent = data.stats.approved;
+                    document.getElementById('stat-rejected').textContent = data.stats.rejected;
+                    document.getElementById('stat-flagged').textContent = data.stats.flagged;
+                    document.getElementById('stat-pending').textContent = data.stats.pending;
+
+                    // Show toast
+                    const toast = document.getElementById('toast');
+                    toast.classList.add('show');
+                    setTimeout(() => toast.classList.remove('show'), 2000);
+                }
+            });
+        }
+    </script>
+</body>
+</html>
