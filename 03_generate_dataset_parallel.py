@@ -430,6 +430,7 @@ class DatasetGenerator:
             'completion_tokens': 0
         }
         self.processed_indices = set()  # Track processed window indices
+        self.failed_indices = set()      # Track failed window indices for retry
     
     def process_window(
         self,
@@ -511,16 +512,18 @@ class DatasetGenerator:
                 for rec in s1_2_records:
                     f2.write(json.dumps(rec, ensure_ascii=False) + "\n")
     
-    def save_checkpoint(self, processed_idx: int, total_windows: int):
-        """Salva il checkpoint con l'indice dell'ultima finestra processata."""
+    def save_checkpoint(self, total_windows: int):
+        """Salva il checkpoint con TUTTI gli indici processati e falliti (safe per parallelismo)."""
         if not self.enable_resume:
             return
             
         with self.checkpoint_lock:
             checkpoint_data = {
-                'last_processed_idx': processed_idx,
+                'processed_indices': sorted(list(self.processed_indices)),  # Tutti gli indici completati
+                'failed_indices': sorted(list(self.failed_indices)),        # Indici falliti da ritentare
                 'total_windows': total_windows,
                 'processed_count': len(self.processed_indices),
+                'failed_count': len(self.failed_indices),
                 'timestamp': datetime.now().isoformat(),
                 'stats': {
                     'processed': self.stats['processed'],
@@ -535,7 +538,7 @@ class DatasetGenerator:
             
             CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CHECKPOINT_PATH, 'w', encoding='utf-8') as f:
-                json.dump(checkpoint_data, f, ensure_ascii=False, indent=2)
+                json.dump(checkpoint_data, f, ensure_ascii=False)
     
     @staticmethod
     def load_checkpoint() -> dict:
@@ -559,7 +562,7 @@ class DatasetGenerator:
     def generate_dataset(
         self,
         windows: List[Tuple[List[Dict], int]],
-        start_idx: int = 0,
+        skip_indices: set = None,
         limit: int = None
     ):
         """
@@ -567,30 +570,39 @@ class DatasetGenerator:
         
         Args:
             windows: Lista di (window, center_idx)
-            start_idx: Indice da cui iniziare (per resume)
+            skip_indices: Set di indici già processati da saltare (per resume)
             limit: Numero massimo di finestre da processare (None = tutte)
         """
-        # Filtra le finestre da processare
-        if limit:
-            windows_to_process = windows[start_idx:start_idx + limit]
-        else:
-            windows_to_process = windows[start_idx:]
+        skip_indices = skip_indices or set()
         
-        total = len(windows_to_process)
-        print(f"[INFO] Processando {total} finestre (da {start_idx} a {start_idx + total})...")
+        # Filtra le finestre: escludi quelle già processate
+        windows_with_idx = [(i, w, c) for i, (w, c) in enumerate(windows) if i not in skip_indices]
+        
+        if limit:
+            windows_with_idx = windows_with_idx[:limit]
+        
+        total = len(windows_with_idx)
+        skipped = len(skip_indices)
+        print(f"[INFO] Processando {total} finestre (saltate {skipped} già completate)...")
         print(f"[INFO] Workers paralleli: {self.max_workers}")
         print(f"[INFO] Timeout per richiesta: {self.timeout}s")
+        
+        # Pre-popola processed_indices con quelle già fatte (per checkpoint incrementale)
+        self.processed_indices = skip_indices.copy()
         
         # Crea un client per ogni worker
         clients = [QwenClient(timeout=self.timeout) for _ in range(self.max_workers)]
         
+        # Track wall-clock time for accurate throughput
+        overall_start = datetime.now()
+        
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Crea i futures
+            # Crea i futures con l'indice ORIGINALE
             futures = {}
-            for i, (window, center_idx) in enumerate(windows_to_process):
+            for i, (original_idx, window, center_idx) in enumerate(windows_with_idx):
                 client = clients[i % self.max_workers]
                 future = executor.submit(self.process_window, window, center_idx, client)
-                futures[future] = (window, center_idx, start_idx + i)
+                futures[future] = (window, center_idx, original_idx)
             
             # Progress bar
             with tqdm(total=total, desc="Generazione Dataset", unit="win") as pbar:
@@ -602,65 +614,105 @@ class DatasetGenerator:
                         # Scrivi i risultati
                         self.write_records(s1, s1_2, STAGE1_RAW_PATH, STAGE1_2_PATH)
                         
-                        # Traccia indice processato e salva checkpoint
+                        # Traccia indice processato e rimuovi da failed se era un retry
                         self.processed_indices.add(original_idx)
-                        self.save_checkpoint(original_idx, len(windows))
+                        self.failed_indices.discard(original_idx)  # Rimuovi se era fallito prima
+                        self.save_checkpoint(len(windows))
                         
-                        # Aggiorna progress bar con statistiche
-                        avg_time = self.stats['total_time'] / self.stats['processed'] if self.stats['processed'] > 0 else 0
+                        # Aggiorna progress bar con statistiche (wall-clock throughput)
+                        wall_elapsed = (datetime.now() - overall_start).total_seconds()
+                        avg_llm_time = self.stats['total_time'] / self.stats['processed'] if self.stats['processed'] > 0 else 0
                         rejection_rate = (self.stats['rejected_qas'] / self.stats['total_qas'] * 100) if self.stats['total_qas'] > 0 else 0
-                        tokens_per_sec = self.stats['total_tokens'] / self.stats['total_time'] if self.stats['total_time'] > 0 else 0
-                        pbar.set_postfix({
-                            'avg_time': f'{avg_time:.1f}s',
-                            'tokens/s': f'{tokens_per_sec:.1f}',
-                            'errors': self.stats['errors'],
-                            'reject%': f'{rejection_rate:.1f}%',
-                            'last_idx': original_idx
-                        })
+                        tokens_per_sec = self.stats['total_tokens'] / wall_elapsed if wall_elapsed > 0 else 0
+                        windows_per_min = (self.stats['processed'] / wall_elapsed) * 60 if wall_elapsed > 0 else 0
+                        
+                        # Average token counts per request
+                        avg_prompt = self.stats['prompt_tokens'] / self.stats['processed'] if self.stats['processed'] > 0 else 0
+                        avg_completion = self.stats['completion_tokens'] / self.stats['processed'] if self.stats['processed'] > 0 else 0
+                        
+                        # Calcola ETA in tempo reale
+                        remaining_windows = total - pbar.n
+                        eta_seconds = (remaining_windows / (self.stats['processed'] / wall_elapsed)) if self.stats['processed'] > 0 else 0
+                        eta_min = eta_seconds / 60
+                        
+                        pbar.set_postfix_str(
+                            f"in={avg_prompt:.0f} out={avg_completion:.0f} | "
+                            f"{tokens_per_sec:.0f} tok/s | "
+                            f"{windows_per_min:.1f} win/m | "
+                            f"err={self.stats['errors']} fail={len(self.failed_indices)} rej={rejection_rate:.0f}% | "
+                            f"ETA={eta_min:.1f}m"
+                        )
+                    else:
+                        # Traccia fallimento per retry futuro
+                        self.failed_indices.add(original_idx)
+                        self.save_checkpoint(len(windows))
                     
                     pbar.update(1)
         
-        # Stampa statistiche finali
-        print(f"\n[STATS] Completato:")
-        print(f"  - Processate: {self.stats['processed']}")
-        print(f"  - Errori: {self.stats['errors']}")
+        # Final wall-clock elapsed time
+        total_wall_time = (datetime.now() - overall_start).total_seconds()
+        total_wall_min = total_wall_time / 60
         
-        # Statistiche token
-        print(f"\n[TOKENS] Utilizzo Token:")
-        print(f"  - Token totali: {self.stats['total_tokens']:,}")
-        print(f"  - Prompt tokens: {self.stats['prompt_tokens']:,}")
-        print(f"  - Completion tokens: {self.stats['completion_tokens']:,}")
-        if self.stats['total_time'] > 0:
-            tokens_per_sec = self.stats['total_tokens'] / self.stats['total_time']
-            print(f"  - Throughput: {tokens_per_sec:.1f} tokens/s")
+        # ========================================
+        # RIEPILOGO FINALE
+        # ========================================
+        print("\n" + "="*60)
+        print("📊 RIEPILOGO GENERAZIONE DATASET")
+        print("="*60)
         
-        # Statistiche validazione numeri
-        print(f"\n[VALIDATION] Preservazione Numeri (HARD mode):")
-        print(f"  - Q&A totali generate: {self.stats['total_qas']}")
-        print(f"  - Q&A accettate: {self.stats['total_qas'] - self.stats['rejected_qas']}")
-        print(f"  - Q&A rigettate: {self.stats['rejected_qas']}")
-        if self.stats['total_qas'] > 0:
-            rejection_rate = (self.stats['rejected_qas'] / self.stats['total_qas']) * 100
-            acceptance_rate = 100 - rejection_rate
-            print(f"  - Tasso accettazione: {acceptance_rate:.1f}%")
-            print(f"  - Tasso rigetto: {rejection_rate:.1f}%")
+        # --- Progresso ---
+        print(f"\n🔄 PROGRESSO:")
+        print(f"   Finestre processate: {self.stats['processed']} / {total}")
+        print(f"   Errori LLM:          {self.stats['errors']}")
+        print(f"   Tempo totale:        {total_wall_min:.1f} minuti ({total_wall_time:.0f}s)")
         
-        # Mostra esempi di rigetto
-        if self.stats['rejected_samples']:
-            print(f"\n[VALIDATION] Esempi di Q&A rigettate (primi {len(self.stats['rejected_samples'])}):")
-            for i, sample in enumerate(self.stats['rejected_samples'], 1):
-                print(f"\n  #{i} - Chunk {sample['chunk_id']}:")
-                print(f"    Q: {sample['question']}")
-                print(f"    A: {sample['answer']}")
-                print(f"    Numeri mancanti: {', '.join(sample['missing_numbers'])}")
+        # --- Performance ---
+        print(f"\n⚡ PERFORMANCE:")
+        if total_wall_time > 0:
+            windows_per_min = (self.stats['processed'] / total_wall_time) * 60
+            tokens_per_sec = self.stats['total_tokens'] / total_wall_time
+            print(f"   Velocità finestre:   {windows_per_min:.1f} finestre/minuto")
+            print(f"   Throughput LLM:      {tokens_per_sec:.0f} tokens/secondo")
         
+        # --- Token Usage ---
+        print(f"\n🔢 UTILIZZO TOKEN:")
+        print(f"   Token totali:        {self.stats['total_tokens']:,}")
+        print(f"   └─ Prompt (input):   {self.stats['prompt_tokens']:,}")
+        print(f"   └─ Completion (out): {self.stats['completion_tokens']:,}")
         if self.stats['processed'] > 0:
-            avg = self.stats['total_time'] / self.stats['processed']
-            print(f"  - Tempo medio: {avg:.2f}s/finestra")
-            remaining = len(windows) - (start_idx + total)
-            if remaining > 0:
-                eta_hours = (remaining * avg) / 3600
-                print(f"  - ETA rimanenti ({remaining} finestre): {eta_hours:.1f} ore")
+            avg_tokens_per_window = self.stats['total_tokens'] / self.stats['processed']
+            print(f"   Media per finestra:  {avg_tokens_per_window:.0f} tokens")
+        
+        # --- Validazione Q&A ---
+        print(f"\n✅ VALIDAZIONE Q&A (preservazione numeri):")
+        print(f"   Q&A generate:        {self.stats['total_qas']}")
+        accepted = self.stats['total_qas'] - self.stats['rejected_qas']
+        print(f"   └─ Accettate:        {accepted} ✓")
+        print(f"   └─ Rigettate:        {self.stats['rejected_qas']} ✗")
+        if self.stats['total_qas'] > 0:
+            acceptance_rate = (accepted / self.stats['total_qas']) * 100
+            print(f"   Tasso accettazione:  {acceptance_rate:.1f}%")
+        
+        # --- Esempi di rigetto (se presenti) ---
+        if self.stats['rejected_samples']:
+            print(f"\n⚠️  ESEMPI Q&A RIGETTATE (primi {len(self.stats['rejected_samples'])}, numeri mancanti):")
+            for i, sample in enumerate(self.stats['rejected_samples'][:3], 1):  # Max 3 esempi
+                print(f"   #{i} Chunk {sample['chunk_id']}: mancano {', '.join(sample['missing_numbers'][:3])}")
+        
+        # --- ETA Rimanenti ---
+        remaining = len(windows) - (start_idx + total)
+        if remaining > 0 and self.stats['processed'] > 0:
+            windows_per_sec = self.stats['processed'] / total_wall_time
+            eta_remaining_min = (remaining / windows_per_sec) / 60
+            eta_remaining_hours = eta_remaining_min / 60
+            print(f"\n⏱️  STIMA RIMANENTI:")
+            print(f"   Finestre restanti:   {remaining}")
+            if eta_remaining_hours >= 1:
+                print(f"   Tempo stimato:       {eta_remaining_hours:.1f} ore")
+            else:
+                print(f"   Tempo stimato:       {eta_remaining_min:.0f} minuti")
+        
+        print("\n" + "="*60)
 
 def main():
     parser = argparse.ArgumentParser(description="Genera dataset con parallelizzazione")
@@ -718,7 +770,7 @@ def main():
     
     # Gestisci resume automatico
     enable_resume = not args.no_resume
-    resume_idx = args.start
+    skip_indices = set()
     
     if args.clear:
         print("[INFO] Clearing output files and checkpoint...")
@@ -727,23 +779,38 @@ def main():
         with open(STAGE1_2_PATH, "w", encoding="utf-8") as f2:
             pass
         DatasetGenerator.clear_checkpoint()
-        resume_idx = 0
-    elif enable_resume and args.start == 0:
-        # Carica checkpoint automaticamente solo se non è stato specificato --start
+    elif enable_resume:
+        # Carica checkpoint automaticamente
         checkpoint = DatasetGenerator.load_checkpoint()
         if checkpoint:
-            resume_idx = checkpoint['last_processed_idx'] + 1
-            print(f"[INFO] Auto-resume attivato: ripresa dall'indice {resume_idx}")
-            print(f"[INFO] Checkpoint precedente: {checkpoint['processed_count']} finestre processate")
-            print(f"[INFO] Timestamp: {checkpoint['timestamp']}")
+            # Carica set di indici processati
+            if 'processed_indices' in checkpoint:
+                skip_indices = set(checkpoint['processed_indices'])
+                print(f"[INFO] \u2705 Resume da checkpoint: {len(skip_indices)} finestre completate")
+            # Retrocompatibilit\u00e0: vecchio formato con last_processed_idx
+            elif 'last_processed_idx' in checkpoint:
+                last_idx = checkpoint['last_processed_idx']
+                skip_indices = set(range(last_idx + 1))
+                print(f"[WARN] \u26a0\ufe0f  Checkpoint vecchio formato (last_idx={last_idx})")
+            
+            # Carica indici falliti - questi NON vanno skippati, vanno ritentati!
+            failed_count = 0
+            if 'failed_indices' in checkpoint:
+                failed_indices = set(checkpoint['failed_indices'])
+                failed_count = len(failed_indices)
+                # Rimuovi i falliti da skip_indices cos\u00ec vengono riprocessati
+                skip_indices = skip_indices - failed_indices
+                if failed_count > 0:
+                    print(f"[INFO] \ud83d\udd04 {failed_count} finestre fallite da ritentare")
+            
+            print(f"[INFO] Timestamp checkpoint: {checkpoint['timestamp']}")
         else:
             print("[INFO] Nessun checkpoint trovato, partenza da zero")
-            resume_idx = 0
-    elif args.start > 0:
-        print(f"[INFO] Resume manuale dall'indice {resume_idx}")
-    else:
-        print("[INFO] Resume disabilitato, partenza da zero")
-        resume_idx = 0
+    
+    if args.start > 0:
+        # Override manuale: salta i primi N
+        skip_indices = set(range(args.start))
+        print(f"[INFO] Resume manuale: salto le prime {args.start} finestre")
     
     # Genera dataset
     generator = DatasetGenerator(
@@ -751,7 +818,7 @@ def main():
         timeout=args.timeout,
         enable_resume=enable_resume
     )
-    generator.generate_dataset(windows, start_idx=resume_idx, limit=args.limit)
+    generator.generate_dataset(windows, skip_indices=skip_indices, limit=args.limit)
     
     print(f"\n[SUCCESS] Output salvati in:")
     print(f"  - {STAGE1_RAW_PATH}")

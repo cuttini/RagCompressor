@@ -25,7 +25,7 @@ CONTEXT_WINDOW_SIZE = 131072  # 128k
 # Chunking
 # target approssimativo di token modello, usiamo conteggio di subword Qwen
 TOKENIZER_NAME = "Qwen/Qwen2.5-32B-Instruct"
-MAX_TOKENS_PER_CHUNK = 800
+MAX_TOKENS_PER_CHUNK = 1024
 MIN_WORDS_PER_CHUNK = 10  # Minimum word count to filter short chunks
 MIN_CONTENT_CHARS = 500  # Minimum characters of actual content (excluding metadata/headers)
 # Adaptive Sliding Window

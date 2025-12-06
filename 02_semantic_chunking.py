@@ -142,6 +142,11 @@ def repair_malformed_tables(text: str) -> str:
     L'OCR può generare tag <table> senza corrispondenti </table>.
     Questa funzione identifica le sezioni problematiche e le ripara.
     
+    Algoritmo migliorato:
+    - Processa gli eventi in ordine di posizione (aperture e chiusure)
+    - Mantiene uno stack delle tabelle aperte
+    - Quando trova una nuova <table> prima di aver chiuso la precedente, inserisce </table>
+    
     Args:
         text: Testo con possibili tabelle malformate
         
@@ -149,48 +154,36 @@ def repair_malformed_tables(text: str) -> str:
         Testo con tabelle riparate
     """
     # Trova tutte le posizioni di <table> e </table>
-    table_opens = [(m.start(), m.group()) for m in re.finditer(r'<table[^>]*>', text, re.IGNORECASE)]
-    table_closes = [m.start() for m in re.finditer(r'</table>', text, re.IGNORECASE)]
+    table_opens = [(m.start(), m.end(), 'open') for m in re.finditer(r'<table[^>]*>', text, re.IGNORECASE)]
+    table_closes = [(m.start(), m.end(), 'close') for m in re.finditer(r'</table>', text, re.IGNORECASE)]
     
-    if len(table_opens) == len(table_closes):
-        # Numero uguale, probabilmente tutto OK
+    # Combina e ordina tutti gli eventi per posizione
+    all_events = sorted(table_opens + table_closes, key=lambda x: x[0])
+    
+    if not all_events:
         return text
     
-    # Ricostruiamo il testo riparando le tabelle
-    repaired = text
+    # Analizza la sequenza di eventi per trovare le inserzioni necessarie
     insertions = []  # Lista di (posizione, testo_da_inserire)
+    open_count = 0  # Numero di tabelle attualmente aperte
     
-    # Stack-based matching per trovare tabelle non chiuse
-    open_stack = []
-    close_idx = 0
+    for pos, end_pos, event_type in all_events:
+        if event_type == 'open':
+            if open_count > 0:
+                # C'è già una tabella aperta! Chiudila prima di questa
+                insertions.append((pos, '</table>\n'))
+            open_count = 1  # Reset a 1 (questa nuova tabella)
+        else:  # close
+            if open_count > 0:
+                open_count -= 1
+            # Se open_count era 0, abbiamo un </table> orfano - lo ignoriamo per ora
     
-    for open_pos, open_tag in table_opens:
-        # Trova il prossimo </table> dopo questa apertura
-        next_close = None
-        for close_pos in table_closes[close_idx:]:
-            if close_pos > open_pos:
-                next_close = close_pos
-                close_idx = table_closes.index(close_pos) + 1
-                break
-        
-        if next_close is None:
-            # Tag non chiuso! Cerchiamo dove dovrebbe finire
-            # Euristica: chiudi prima del prossimo ## header o del prossimo <table>
-            search_start = open_pos + len(open_tag)
-            
-            # Cerca il prossimo header o tabella
-            next_section = re.search(r'\n## |<table', text[search_start:], re.IGNORECASE)
-            
-            if next_section:
-                close_position = search_start + next_section.start()
-            else:
-                # Fine del testo
-                close_position = len(text)
-            
-            # Inserisci </table> prima della nuova sezione
-            insertions.append((close_position, '\n</table>\n'))
+    # Se ci sono tabelle ancora aperte alla fine, chiudile
+    if open_count > 0:
+        insertions.append((len(text), '\n</table>'))
     
     # Applica le inserzioni in ordine inverso per non invalidare le posizioni
+    repaired = text
     for pos, tag in sorted(insertions, reverse=True):
         repaired = repaired[:pos] + tag + repaired[pos:]
     
@@ -198,6 +191,87 @@ def repair_malformed_tables(text: str) -> str:
         print(f"[INFO] Riparate {len(insertions)} tabelle malformate")
     
     return repaired
+
+def split_large_table(table_html: str, max_tokens: int) -> List[str]:
+    """
+    Divide una tabella HTML troppo grande in sotto-tabelle valide.
+    Ogni sotto-tabella mantiene gli header originali.
+    
+    Args:
+        table_html: HTML della tabella completa
+        max_tokens: Massimo numero di token per sotto-tabella
+        
+    Returns:
+        Lista di stringhe HTML, ognuna una tabella valida
+    """
+    # Estrai attributi del tag <table>
+    table_match = re.match(r'<table([^>]*)>', table_html, re.IGNORECASE)
+    table_attrs = table_match.group(1) if table_match else ''
+    
+    # Estrai tutte le righe
+    rows = re.findall(r'<tr[^>]*>.*?</tr>', table_html, re.DOTALL | re.IGNORECASE)
+    
+    if not rows:
+        return [table_html]  # Nessuna riga trovata, ritorna originale
+    
+    # Identifica header rows (contengono <th>)
+    header_rows = []
+    data_rows = []
+    for row in rows:
+        if '<th' in row.lower():
+            header_rows.append(row)
+        else:
+            data_rows.append(row)
+    
+    # FALLBACK: Se non ci sono <th>, usa la prima riga come header
+    # Questo è comune nelle tabelle OCR italiane che non usano <th>
+    if not header_rows and data_rows:
+        header_rows = [data_rows[0]]
+        data_rows = data_rows[1:]
+    
+    # Se non ci sono righe dati, ritorna originale
+    if not data_rows:
+        return [table_html]
+    
+    # Costruisci header template
+    header_html = f"<table{table_attrs}>\n" + "\n".join(header_rows)
+    footer_html = "\n</table>"
+    overhead_tokens = count_tokens(header_html + footer_html)
+    
+    # Budget per le righe dati (95% del max per margine di sicurezza)
+    effective_max = int(max_tokens * 0.95)
+    row_budget = effective_max - overhead_tokens
+    if row_budget <= 0:
+        # Header stesso troppo grande, impossibile dividere sensatamente
+        return [table_html]
+    
+    # Raggruppa righe dati rispettando il budget
+    sub_tables = []
+    current_rows = []
+    current_tokens = 0
+    
+    for row in data_rows:
+        row_tokens = count_tokens(row)
+        
+        if current_tokens + row_tokens > row_budget and current_rows:
+            # Flush current batch
+            sub_table = header_html + "\n" + "\n".join(current_rows) + footer_html
+            sub_tables.append(sub_table)
+            current_rows = [row]
+            current_tokens = row_tokens
+        else:
+            current_rows.append(row)
+            current_tokens += row_tokens
+    
+    # Flush ultima batch
+    if current_rows:
+        sub_table = header_html + "\n" + "\n".join(current_rows) + footer_html
+        sub_tables.append(sub_table)
+    
+    if len(sub_tables) > 1:
+        print(f"[INFO] Tabella divisa in {len(sub_tables)} sotto-tabelle")
+    
+    return sub_tables if sub_tables else [table_html]
 
 def get_actual_content_length(text: str) -> int:
     """
@@ -503,28 +577,32 @@ def _split_with_tables(text: str, max_tokens: int) -> List[str]:
             
             # Check if restored chunk is too large
             restored_tokens = count_tokens(restored)
-            if ALLOW_TABLE_OVERFLOW and restored_tokens <= MAX_TABLE_TOKENS:
-                final_chunks.append(restored)
-            elif restored_tokens <= max_tokens:
+            if restored_tokens <= max_tokens:
+                # Chunk fits within limit, use as-is
                 final_chunks.append(restored)
             else:
-                # Table too large, force split
-                print(f"[WARNING] Chunk con tabella troppo grande ({restored_tokens} tokens), split forzato")
-                # Try to split by keeping tables separate
+                # Tabella troppo grande, usa split intelligente per righe
+                print(f"[INFO] Tabella grande ({restored_tokens} tokens), split per righe")
+                # Ritrova la tabella nel contenuto
                 for placeholder, table_html in table_placeholders.items():
                     if placeholder in chunk:
-                        # Add text before table
-                        before_table = restored.split(table_html)[0].strip()
-                        if before_table and not before_table.startswith('__TABLE_'):
+                        # Ottieni testo prima e dopo la tabella
+                        parts_split = chunk.split(placeholder)
+                        before_table = parts_split[0].strip() if parts_split else ""
+                        after_table = parts_split[1].strip() if len(parts_split) > 1 else ""
+                        
+                        # Aggiungi testo prima (se presente e valido)
+                        if before_table and not before_table.startswith('__TABLE_') and not '__TABLE_' in before_table:
                             final_chunks.append(before_table)
-                        # Add table separately
-                        final_chunks.append(table_html)
-                        # Add text after table (if any)
-                        parts = restored.split(table_html)
-                        if len(parts) > 1:
-                            after_table = parts[1].strip()
-                            if after_table and not '__TABLE_' in after_table:
-                                final_chunks.append(after_table)
+                        
+                        # Split intelligente della tabella (rispetta max_tokens = 1024)
+                        sub_tables = split_large_table(table_html, max_tokens)
+                        for sub in sub_tables:
+                            final_chunks.append(sub)
+                        
+                        # Aggiungi testo dopo (se presente e valido)
+                        if after_table and not '__TABLE_' in after_table:
+                            final_chunks.append(after_table)
                         break
         else:
             final_chunks.append(chunk)
@@ -641,23 +719,51 @@ def chunk_markdown(md_text: str, source_file: str) -> List[Dict]:
             if placeholder in body_with_tables:
                 body_with_tables = body_with_tables.replace(placeholder, table_html)
 
+        # Calculate overhead from metadata header and title
+        metadata_header = f"> {metadata['source_cleaned']} {metadata['year']} | {metadata['topic']} | p.{page_number} <\n\n"
+        title_part = f"{title.strip()}\n\n"
+        overhead_tokens = count_tokens(metadata_header + title_part)
+        
+        # Budget for content is max_tokens minus overhead
+        content_budget = MAX_TOKENS_PER_CHUNK - overhead_tokens
+        
         # Standard splitting for normal content (now with restored tables)
-        for sub in split_long_text(body_with_tables, MAX_TOKENS_PER_CHUNK):
+        for sub in split_long_text(body_with_tables, content_budget):
             if len(sub.split()) < MIN_WORDS_PER_CHUNK:
                 continue
             
-            # INIETTA HEADER DI METADATI STRUTTURATI (Compact format)
-            # Old format: ~100 tokens, New format: ~15-20 tokens
-            # Title is already in markdown header below, no need to duplicate
-            metadata_header = f"> {metadata['source_cleaned']} {metadata['year']} | {metadata['topic']} | p.{page_number} <\n\n"
-            
             # Assembla il contenuto finale con header + titolo + testo
-            final_content = f"{metadata_header}{title.strip()}\n\n{sub.strip()}"
+            final_content = f"{metadata_header}{title_part}{sub.strip()}"
+            
+            # FINAL TOKEN CHECK: Truncate if still over budget
+            final_tokens = count_tokens(final_content)
+            if final_tokens > MAX_TOKENS_PER_CHUNK:
+                # Truncate content to fit
+                tokens = tokenizer.encode(final_content, add_special_tokens=False)
+                truncated_tokens = tokens[:MAX_TOKENS_PER_CHUNK]
+                final_content = tokenizer.decode(truncated_tokens)
+                # Clean up potentially broken HTML tags at the end
+                if '<' in final_content[-50:] and '>' not in final_content[-20:]:
+                    last_lt = final_content.rfind('<')
+                    final_content = final_content[:last_lt].strip()
             
             # Validate actual content length (excluding metadata and formatting)
             actual_content_len = get_actual_content_length(final_content)
             if actual_content_len < MIN_CONTENT_CHARS:
                 continue  # Skip chunks with insufficient actual content
+            
+            # FILTER: Discard cover/frontispiece chunks (editorial junk)
+            # Short content + editorial keywords = likely not useful normative content
+            EDITORIAL_KEYWORDS = [
+                'isbn', 'finito di stampare', 'editore:', 'prezzo:',
+                'grafica di copertina', 'stampato da', 'stampa:', 
+                'tipografia', 'copyright ©', 'tutti i diritti riservati',
+                'proprietà letteraria', 'printed in italy'
+            ]
+            if actual_content_len < 300:
+                content_lower = final_content.lower()
+                if any(kw in content_lower for kw in EDITORIAL_KEYWORDS):
+                    continue  # Skip editorial/cover junk
             
             chunks.append({
                 "source": source_file,

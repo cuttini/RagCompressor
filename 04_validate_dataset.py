@@ -8,28 +8,50 @@ from config import STAGE1_RAW_PATH, STAGE1_VALIDATED_PATH
 from llm_client import QwenClient
 
 SYSTEM_PROMPT = (
-    "Sei un revisore fiscale estremamente severo. "
-    "Valuti se una risposta è COMPLETAMENTE supportata dal testo normativo fornito."
+    "Sei un revisore fiscale ESTREMAMENTE SEVERO specializzato in rilevamento di allucinazioni. "
+    "Il tuo compito è verificare se OGNI SINGOLA informazione nella risposta è ESPLICITAMENTE "
+    "presente nel testo normativo fornito. NON devi usare la tua conoscenza pregressa del mondo "
+    "per valutare la correttezza della risposta. Una risposta può essere VERA nel mondo reale "
+    "ma SBAGLIATA ai fini di questa valutazione se le informazioni non sono nel testo."
 )
 
 USER_TEMPLATE = """
-TESTO NORMATIVO (SEAC):
+=== TESTO NORMATIVO (UNICA FONTE DI VERITÀ) ===
 
 \"\"\"{doc}\"\"\"
 
+=== FINE TESTO NORMATIVO ===
 
 DOMANDA:
 {question}
 
-RISPOSTA PROPOSTA:
+RISPOSTA DA VERIFICARE:
 {answer}
 
-Valuta da 1 a 5 quanto la risposta è supportata dal testo (1 = fuorviante, 5 = completamente corretta
-e giustificata dal testo). Rispondi SOLO con un JSON del tipo:
+=== ISTRUZIONI DI VALUTAZIONE ANTI-ALLUCINAZIONE ===
+
+Devi verificare se OGNI informazione nella risposta è ESPLICITAMENTE supportata dal TESTO NORMATIVO sopra.
+
+REGOLE CRITICHE:
+1. NON usare MAI la tua conoscenza pregressa (es. leggi che conosci, date, importi, scadenze).
+2. Se la risposta contiene dettagli VERI nel mondo reale ma ASSENTI nel testo → punteggio 1 o 2.
+3. Se la risposta cita leggi, decreti, articoli NON menzionati nel testo → punteggio 1 o 2.
+4. Se la risposta aggiunge date, importi, percentuali NON presenti nel testo → punteggio 1 o 2.
+5. Punteggio 4-5 SOLO se ogni singolo fatto è verificabile rileggendo il testo sopra.
+
+SCALA DI VALUTAZIONE:
+- 1 = Risposta contiene informazioni esterne/inventate o contraddice il testo
+- 2 = Risposta contiene dettagli corretti nel mondo reale ma NON presenti nel testo (DATA LEAKAGE)
+- 3 = Risposta parzialmente supportata, alcuni dettagli non verificabili nel testo
+- 4 = Risposta ben supportata dal testo con minime inferenze ragionevoli
+- 5 = Ogni informazione è ESPLICITAMENTE citata o direttamente deducibile dal testo
+
+Rispondi SOLO con un JSON del tipo:
 
 {{
   "score": 1-5,
-  "justification": "spiega in poche frasi perché"
+  "justification": "spiega brevemente perché",
+  "external_info": ["lista di informazioni nella risposta NON trovate nel testo, vuota se nessuna"]
 }}
 """
 
