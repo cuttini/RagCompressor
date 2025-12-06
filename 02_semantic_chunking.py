@@ -740,12 +740,20 @@ def chunk_markdown(md_text: str, source_file: str) -> List[Dict]:
             if final_tokens > MAX_TOKENS_PER_CHUNK:
                 # Truncate content to fit
                 tokens = tokenizer.encode(final_content, add_special_tokens=False)
-                truncated_tokens = tokens[:MAX_TOKENS_PER_CHUNK]
+                truncated_tokens = tokens[:MAX_TOKENS_PER_CHUNK - 10]  # Leave room for closing tags
                 final_content = tokenizer.decode(truncated_tokens)
+                
                 # Clean up potentially broken HTML tags at the end
                 if '<' in final_content[-50:] and '>' not in final_content[-20:]:
                     last_lt = final_content.rfind('<')
                     final_content = final_content[:last_lt].strip()
+                
+                # Repair orphan table tags after truncation
+                opens = len(re.findall(r'<table', final_content, re.IGNORECASE))
+                closes = len(re.findall(r'</table>', final_content, re.IGNORECASE))
+                if opens > closes:
+                    # Add missing closing tags
+                    final_content = final_content.rstrip() + '\n</table>' * (opens - closes)
             
             # Validate actual content length (excluding metadata and formatting)
             actual_content_len = get_actual_content_length(final_content)
@@ -764,6 +772,17 @@ def chunk_markdown(md_text: str, source_file: str) -> List[Dict]:
                 content_lower = final_content.lower()
                 if any(kw in content_lower for kw in EDITORIAL_KEYWORDS):
                     continue  # Skip editorial/cover junk
+            
+            # FINAL CLEANUP: Balance table tags
+            opens = len(re.findall(r'<table', final_content, re.IGNORECASE))
+            closes = len(re.findall(r'</table>', final_content, re.IGNORECASE))
+            if closes > opens:
+                # Remove excess closing tags (anywhere in content)
+                for _ in range(closes - opens):
+                    final_content = re.sub(r'\s*</table>\s*', '', final_content, count=1, flags=re.IGNORECASE)
+            elif opens > closes:
+                # Add missing closing tags at the end
+                final_content = final_content.rstrip() + '\n</table>' * (opens - closes)
             
             chunks.append({
                 "source": source_file,
